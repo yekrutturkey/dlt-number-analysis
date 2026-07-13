@@ -1,0 +1,55 @@
+{
+  "target_issue": "26078",
+  "tickets": [
+    {
+      "target_issue": "26078",
+      "ticket_id": "26078-manual-01",
+      "front_numbers": [7, 16, 20, 29, 35],
+      "back_numbers": [5, 12],
+      "ticket_role": "manual_purchase"
+    },
+    {
+      "target_issue": "26078",
+      "ticket_id": "26078-manual-02",
+      "front_numbers": [4, 12, 18, 25, 32],
+      "back_numbers": [2, 8],
+      "ticket_role": "manual_purchase"
+    },
+    {
+      "target_issue": "26078",
+      "ticket_id": "26078-manual-03",
+      "front_numbers": [2, 10, 17, 24, 31],
+      "back_numbers": [1, 9],
+      "ticket_role": "manual_purchase"
+    },
+    {
+      "target_issue": "26078",
+      "ticket_id": "26078-manual-04",
+      "front_numbers": [6, 15, 22, 27, 33],
+      "back_numbers": [4, 10],
+      "ticket_role": "manual_purchase"
+    },
+    {
+      "target_issue": "26078",
+      "ticket_id": "26078-manual-05",
+      "front_numbers": [8, 13, 21, 26, 34],
+      "back_numbers": [3, 11],
+      "ticket_role": "manual_purchase"
+    }
+  ],
+  "strategy_name": "manual_purchase",
+  "model_version": "manual-v0",
+  "data_cutoff_issue": "26077",
+  "generated_at": null,
+  "recorded_at": "2026-07-14T03:55:44.9724628+08:00",
+  "random_seed": null,
+  "parameters": {
+    "manual_entry_source": "user_chat",
+    "purchase_timing": "pre_draw_as_stated_by_user",
+    "original_generated_at_status": "not_provided",
+    "prize_context": "pool_below_800m",
+    "prize_context_evidence_url": "https://www.gdlottery.cn/f_html/kjgg/P085_26077.html"
+  },
+  "prediction_origin": "manual_chat",
+  "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。"
+}
