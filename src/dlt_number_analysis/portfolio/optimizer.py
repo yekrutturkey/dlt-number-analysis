@@ -1,4 +1,4 @@
-"""从已评分候选票池选择满足硬约束的五注 Portfolio。"""
+"""Seeded search for a valid and auditable five-ticket portfolio."""
 
 from __future__ import annotations
 
@@ -18,14 +18,13 @@ from dlt_number_analysis.portfolio.models import (
 
 
 class PortfolioOptimizationError(ValueError):
-    """候选池和搜索预算内没有找到满足硬约束的五注组合。"""
+    """No feasible portfolio was found within the configured seeded search budget."""
 
 
-def _passes_non_core_constraints(
+def _passes_base_constraints(
     candidates: tuple[CandidateTicketScore, ...],
     constraints: PortfolioConstraints,
 ) -> bool:
-    """快速检查号码池、相交、后区和结构覆盖约束。"""
     if len({candidate.candidate_id for candidate in candidates}) != constraints.ticket_count:
         return False
     if len({candidate.back_numbers for candidate in candidates}) != constraints.ticket_count:
@@ -47,16 +46,17 @@ def _passes_non_core_constraints(
     )
 
 
-def _select_core_numbers(
+def _classify_repeated_numbers(
     candidates: tuple[CandidateTicketScore, ...],
     constraints: PortfolioConstraints,
-) -> tuple[int, ...] | None:
-    """选择 2–3 个指定核心；其他偶然重号不自动视为核心。"""
+) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+    """Classify every repeated number as core or support; leave singletons exploratory."""
     counts = Counter(number for candidate in candidates for number in candidate.front_numbers)
-    eligible = [
-        number for number, count in counts.items() if count in (constraints.core_min_occurrences, 3)
-    ]
-    if len(eligible) < constraints.min_core_front_numbers:
+    if any(count > constraints.max_front_number_occurrences for count in counts.values()):
+        return None
+    repeated = sorted(number for number, count in counts.items() if count >= 2)
+    triples = {number for number in repeated if counts[number] == 3}
+    if len(triples) > constraints.max_core_numbers_with_three_occurrences:
         return None
 
     number_quality = {
@@ -66,36 +66,46 @@ def _select_core_numbers(
             if number in candidate.front_numbers
         )
         / counts[number]
-        for number in eligible
+        for number in repeated
     }
-    eligible.sort(key=lambda number: (-number_quality[number], number))
-    eligible = eligible[:12]
-
-    best: tuple[int, ...] | None = None
-    best_quality = -1.0
+    best: tuple[tuple[int, ...], tuple[int, ...]] | None = None
+    best_score = -1.0
     for core_count in range(
-        min(constraints.max_core_front_numbers, len(eligible)),
-        constraints.min_core_front_numbers - 1,
-        -1,
+        constraints.min_core_front_numbers,
+        constraints.max_core_front_numbers + 1,
     ):
-        for core in combinations(eligible, core_count):
-            if (
-                sum(counts[number] == 3 for number in core)
-                > constraints.max_core_numbers_with_three_occurrences
+        if core_count > len(repeated):
+            continue
+        for core_values in combinations(repeated, core_count):
+            core = set(core_values)
+            if not triples.issubset(core):
+                continue
+            if any(
+                not constraints.core_min_occurrences
+                <= counts[number]
+                <= constraints.core_max_occurrences
+                for number in core
             ):
                 continue
-            covered_tickets = sum(
+            support = set(repeated).difference(core)
+            if not (
+                constraints.min_support_front_numbers
+                <= len(support)
+                <= constraints.max_support_front_numbers
+            ):
+                continue
+            if any(counts[number] > constraints.support_max_occurrences for number in support):
+                continue
+            stable_coverage = sum(
                 bool(set(candidate.front_numbers).intersection(core)) for candidate in candidates
             )
-            if covered_tickets < constraints.stable_ticket_count:
+            if stable_coverage < constraints.stable_ticket_count:
                 continue
-            quality = covered_tickets + sum(number_quality[number] for number in core)
-            if quality > best_quality:
-                best = tuple(sorted(core))
-                best_quality = quality
-        if best is not None:
-            return best
-    return None
+            score = stable_coverage + sum(number_quality[number] for number in core)
+            if score > best_score:
+                best = tuple(sorted(core)), tuple(sorted(support))
+                best_score = score
+    return best
 
 
 def _assign_roles(
@@ -103,7 +113,6 @@ def _assign_roles(
     core_numbers: tuple[int, ...],
     constraints: PortfolioConstraints,
 ) -> tuple[PortfolioTicket, ...] | None:
-    """优先把核心覆盖高且单票分高的三注标记为核心/稳健票。"""
     ranked = sorted(
         candidates,
         key=lambda candidate: (
@@ -139,6 +148,7 @@ def _assign_roles(
 def _score_portfolio(
     tickets: tuple[PortfolioTicket, ...],
     core_numbers: tuple[int, ...],
+    support_numbers: tuple[int, ...],
     constraints: PortfolioConstraints,
     *,
     single_ticket_weight: float,
@@ -147,7 +157,6 @@ def _score_portfolio(
     structure_weight: float,
     repeat_penalty_weight: float,
 ) -> PortfolioScoreBreakdown:
-    """计算单票、组合多样性、核心集中度、结构覆盖和重复惩罚。"""
     fronts = [set(ticket.front_numbers) for ticket in tickets]
     front_counts = Counter(number for ticket in tickets for number in ticket.front_numbers)
     front_pool_size = len(set().union(*fronts))
@@ -155,13 +164,41 @@ def _score_portfolio(
     back_pool_size = len({number for ticket in tickets for number in ticket.back_numbers})
 
     single_ticket_score = sum(ticket.combined_ticket_score for ticket in tickets) / len(tickets)
-    front_diversity = min(front_pool_size / constraints.max_front_pool_size, 1.0)
+    pool_distance = abs(front_pool_size - constraints.target_front_pool_size)
+    maximum_distance = max(
+        constraints.target_front_pool_size - constraints.min_front_pool_size,
+        constraints.max_front_pool_size - constraints.target_front_pool_size,
+        1,
+    )
+    target_pool_score = max(0.0, 1.0 - pool_distance / maximum_distance)
     pairwise_diversity = 1.0 - sum(overlaps) / (len(overlaps) * 5)
     back_diversity = back_pool_size / 12
-    portfolio_diversity = (front_diversity + pairwise_diversity + back_diversity) / 3
+    portfolio_diversity = (target_pool_score + pairwise_diversity + back_diversity) / 3
 
-    triple_count = sum(front_counts[number] == 3 for number in core_numbers)
-    core_concentration = 1.0 - 0.2 * triple_count
+    core_set = set(core_numbers)
+    stable = [ticket for ticket in tickets if ticket.ticket_role == "core_stable"]
+    stable_core_occurrences = sum(
+        len(set(ticket.front_numbers).intersection(core_set)) for ticket in stable
+    )
+    total_core_occurrences = sum(front_counts[number] for number in core_set)
+    core_number_coverage = sum(
+        any(number in ticket.front_numbers for ticket in stable) for number in core_set
+    ) / len(core_set)
+    core_occurrence_compliance = sum(
+        constraints.core_min_occurrences <= front_counts[number] <= constraints.core_max_occurrences
+        for number in core_set
+    ) / len(core_set)
+    stable_ticket_coverage = sum(
+        bool(set(ticket.front_numbers).intersection(core_set)) for ticket in stable
+    ) / len(stable)
+    stable_occurrence_share = stable_core_occurrences / total_core_occurrences
+    core_concentration = (
+        core_number_coverage
+        + core_occurrence_compliance
+        + stable_ticket_coverage
+        + stable_occurrence_share
+    ) / 4
+
     sum_coverage = min(
         len({ticket.sum_interval for ticket in tickets}) / constraints.min_sum_intervals,
         1.0,
@@ -172,11 +209,12 @@ def _score_portfolio(
     )
     structure_coverage = (sum_coverage + zone_coverage) / 2
 
-    non_core_repeat_excess = (
+    classified = core_set.union(support_numbers)
+    unclassified_repeat_excess = (
         sum(
-            max(count - 1, 0)
+            count - 1
             for number, count in front_counts.items()
-            if number not in core_numbers
+            if count > 1 and number not in classified
         )
         / 25
     )
@@ -184,7 +222,10 @@ def _score_portfolio(
         len(overlaps) * constraints.max_pairwise_front_overlap,
         1,
     )
-    excessive_repeat_penalty = min((non_core_repeat_excess + overlap_excess) / 2, 1.0)
+    excessive_repeat_penalty = min(
+        (unclassified_repeat_excess + overlap_excess) / 2,
+        1.0,
+    )
 
     positive_weight = single_ticket_weight + diversity_weight + core_weight + structure_weight
     positive_score = (
@@ -217,14 +258,14 @@ def optimize_portfolio(
     structure_weight: float = 0.15,
     repeat_penalty_weight: float = 0.20,
 ) -> PortfolioSelection:
-    """使用带种子的随机搜索从至少一万注候选中优化五注 Portfolio。"""
+    """Select five tickets under all v0.4 hard constraints."""
     active_constraints = constraints or PortfolioConstraints()
     if len(pool.candidates) < 10_000:
-        raise ValueError("Portfolio 优化要求至少 10000 注候选")
+        raise ValueError("portfolio optimization requires at least 10,000 candidates")
     if search_trials < 1:
-        raise ValueError("search_trials 必须大于 0")
+        raise ValueError("search_trials must be positive")
     if not 5 <= stable_candidate_limit <= len(pool.candidates):
-        raise ValueError("stable_candidate_limit 必须位于 5 和候选数之间")
+        raise ValueError("stable_candidate_limit must be between 5 and candidate pool size")
     weights = (
         single_ticket_weight,
         diversity_weight,
@@ -233,9 +274,9 @@ def optimize_portfolio(
         repeat_penalty_weight,
     )
     if any(not isfinite(weight) or weight < 0 for weight in weights):
-        raise ValueError("Portfolio 目标函数权重必须是非负有限数值")
+        raise ValueError("portfolio objective weights must be finite and non-negative")
     if sum(weights[:4]) <= 0:
-        raise ValueError("正向目标函数权重之和必须大于 0")
+        raise ValueError("positive portfolio objective weights must sum above zero")
 
     ranked = sorted(
         pool.candidates,
@@ -245,6 +286,7 @@ def optimize_portfolio(
     rng = Random(random_seed)
     best_tickets: tuple[PortfolioTicket, ...] | None = None
     best_core: tuple[int, ...] | None = None
+    best_support: tuple[int, ...] | None = None
     best_scores: PortfolioScoreBreakdown | None = None
     feasible_count = 0
 
@@ -258,17 +300,19 @@ def optimize_portfolio(
             selected.append(candidate)
             selected_ids.add(candidate.candidate_id)
         selected_tuple = tuple(selected)
-        if not _passes_non_core_constraints(selected_tuple, active_constraints):
+        if not _passes_base_constraints(selected_tuple, active_constraints):
             continue
-        core_numbers = _select_core_numbers(selected_tuple, active_constraints)
-        if core_numbers is None:
+        classification = _classify_repeated_numbers(selected_tuple, active_constraints)
+        if classification is None:
             continue
+        core_numbers, support_numbers = classification
         tickets = _assign_roles(selected_tuple, core_numbers, active_constraints)
         if tickets is None:
             continue
         scores = _score_portfolio(
             tickets,
             core_numbers,
+            support_numbers,
             active_constraints,
             single_ticket_weight=single_ticket_weight,
             diversity_weight=diversity_weight,
@@ -286,11 +330,12 @@ def optimize_portfolio(
         ):
             best_tickets = tickets
             best_core = core_numbers
+            best_support = support_numbers
             best_scores = scores
 
-    if best_tickets is None or best_core is None or best_scores is None:
+    if best_tickets is None or best_core is None or best_support is None or best_scores is None:
         raise PortfolioOptimizationError(
-            "在当前候选池和搜索预算内没有找到满足全部 Portfolio 硬约束的组合"
+            "no portfolio satisfied all hard constraints within the seeded search budget"
         )
 
     return PortfolioSelection(
@@ -300,6 +345,7 @@ def optimize_portfolio(
         random_seed=random_seed,
         tickets=best_tickets,
         core_front_numbers=best_core,
+        support_front_numbers=best_support,
         front_pool_size=len({number for ticket in best_tickets for number in ticket.front_numbers}),
         sum_interval_count=len({ticket.sum_interval for ticket in best_tickets}),
         zone_structure_count=len({ticket.zone_structure for ticket in best_tickets}),
@@ -317,9 +363,7 @@ def optimize_portfolio(
             "core_weight": core_weight,
             "structure_weight": structure_weight,
             "repeat_penalty_weight": repeat_penalty_weight,
-            "core_definition": (
-                "2_to_3_designated_numbers_with_2_occurrences_and_at_most_one_with_3;"
-                "incidental_non_core_repeats_allowed"
-            ),
+            "target_front_pool_size": active_constraints.target_front_pool_size,
+            "classification": "all_repeats_are_explicitly_core_or_support",
         },
     )

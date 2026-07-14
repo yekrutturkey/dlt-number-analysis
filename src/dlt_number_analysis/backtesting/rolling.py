@@ -1,4 +1,4 @@
-"""只用目标期之前数据生成历史预测的向前滚动回测。"""
+"""Strict expanding-window backtests with a cached random five-ticket baseline."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, time
 from decimal import Decimal
+from functools import lru_cache
 from random import Random
-from statistics import median
+from statistics import fmean, median, stdev
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -19,10 +20,18 @@ from dlt_number_analysis.backtesting.models import (
     BacktestPeriodResult,
     BacktestReport,
     BacktestStrategySummary,
+    ConfidenceInterval,
     RandomBaselineSummary,
+    RandomMetricSummary,
 )
-from dlt_number_analysis.data import CSV_COLUMNS, DrawRecord
-from dlt_number_analysis.data.data_validator import validate_draw_dataframe
+from dlt_number_analysis.data import (
+    CSV_COLUMNS,
+    DataQualityReport,
+    DrawRecord,
+    assert_backtest_ready,
+    generate_data_quality_report,
+    validate_draw_dataframe,
+)
 from dlt_number_analysis.evaluation import (
     IssuePrizeRecord,
     PrizeRuleSchedule,
@@ -31,35 +40,44 @@ from dlt_number_analysis.evaluation import (
     evaluate_prediction,
 )
 from dlt_number_analysis.models import PredictionRecord
+from dlt_number_analysis.pipeline import PipelineConfig, optimized_portfolio_strategy
 from dlt_number_analysis.scoring import NumberScorer, cumulative_frequency_score
 from dlt_number_analysis.strategies import StrategyFunction, random_baseline
 
+RANDOM_METRICS: tuple[str, ...] = (
+    "best_front_hits",
+    "best_back_hits",
+    "best_total_hits",
+    "at_least_three_front",
+    "at_least_2_plus_1",
+    "front_pool_coverage",
+    "back_pool_coverage",
+    "unique_hit_concentration",
+)
+
 
 class MissingPrizeAmountError(ValueError):
-    """已弃用：v0.3 对缺失奖金保留命中指标并把 ROI 标为不可用。"""
+    """Deprecated: missing historical amounts now preserve hits and disable ROI."""
 
 
 @dataclass(frozen=True, slots=True)
 class _HitMetrics:
-    """与奖级规则无关的五注命中指标。"""
-
     best_front_hits: int
     best_back_hits: int
     best_total_hits: int
     at_least_three_front: bool
     at_least_2_plus_1: bool
-    hit_concentration_ratio: float
+    ticket_hit_share: float
+    unique_hit_concentration: float
     front_pool_coverage: int
     back_pool_coverage: int
 
 
 def _draw_from_row(row: pd.Series) -> DrawRecord:
-    """把已经校验的数据行恢复为 DrawRecord。"""
     return DrawRecord.model_validate({column: row[column] for column in CSV_COLUMNS})
 
 
 def _historical_generation_time(cutoff_draw: DrawRecord) -> datetime:
-    """在最后一期历史开奖日结束时建立带时区的历史预测时间戳。"""
     return datetime.combine(
         cutoff_draw.draw_date,
         time(23, 59),
@@ -67,94 +85,112 @@ def _historical_generation_time(cutoff_draw: DrawRecord) -> datetime:
     )
 
 
-def _hit_metrics(prediction: PredictionRecord, actual_draw: DrawRecord) -> _HitMetrics:
-    """不依赖任何奖级规则计算五注命中与号码池覆盖。"""
-    actual_front = set(actual_draw.front_numbers)
-    actual_back = set(actual_draw.back_numbers)
+def _calculate_hit_metrics(
+    tickets: Sequence[tuple[set[int], set[int]]],
+    actual_front: set[int],
+    actual_back: set[int],
+) -> _HitMetrics:
     hit_pairs = [
-        (
-            len(set(ticket.front_numbers).intersection(actual_front)),
-            len(set(ticket.back_numbers).intersection(actual_back)),
-        )
-        for ticket in prediction.tickets
+        (len(front.intersection(actual_front)), len(back.intersection(actual_back)))
+        for front, back in tickets
     ]
-    total_hits = [front_hits + back_hits for front_hits, back_hits in hit_pairs]
-    all_hits = sum(total_hits)
-    front_pool = {number for ticket in prediction.tickets for number in ticket.front_numbers}
-    back_pool = {number for ticket in prediction.tickets for number in ticket.back_numbers}
+    totals = [front + back for front, back in hit_pairs]
+    all_ticket_hits = sum(totals)
+    front_pool = set().union(*(front for front, _ in tickets))
+    back_pool = set().union(*(back for _, back in tickets))
+    front_pool_coverage = len(front_pool.intersection(actual_front))
+    back_pool_coverage = len(back_pool.intersection(actual_back))
+    unique_pool_hits = front_pool_coverage + back_pool_coverage
+    best_total = max(totals)
     return _HitMetrics(
-        best_front_hits=max(front_hits for front_hits, _ in hit_pairs),
-        best_back_hits=max(back_hits for _, back_hits in hit_pairs),
-        best_total_hits=max(total_hits),
-        at_least_three_front=any(front_hits >= 3 for front_hits, _ in hit_pairs),
-        at_least_2_plus_1=any(
-            front_hits >= 2 and back_hits >= 1 for front_hits, back_hits in hit_pairs
-        ),
-        hit_concentration_ratio=0.0 if all_hits == 0 else max(total_hits) / all_hits,
-        front_pool_coverage=len(front_pool.intersection(actual_front)),
-        back_pool_coverage=len(back_pool.intersection(actual_back)),
+        best_front_hits=max(front for front, _ in hit_pairs),
+        best_back_hits=max(back for _, back in hit_pairs),
+        best_total_hits=best_total,
+        at_least_three_front=any(front >= 3 for front, _ in hit_pairs),
+        at_least_2_plus_1=any(front >= 2 and back >= 1 for front, back in hit_pairs),
+        ticket_hit_share=(0.0 if all_ticket_hits == 0 else best_total / all_ticket_hits),
+        unique_hit_concentration=(0.0 if unique_pool_hits == 0 else best_total / unique_pool_hits),
+        front_pool_coverage=front_pool_coverage,
+        back_pool_coverage=back_pool_coverage,
     )
 
 
-def _random_best_total_hits(actual_draw: DrawRecord, random_seed: int) -> int:
-    """用一个种子直接模拟五注均匀随机 baseline 的最佳总命中数。"""
+def _hit_metrics(prediction: PredictionRecord, actual_draw: DrawRecord) -> _HitMetrics:
+    return _calculate_hit_metrics(
+        [(set(ticket.front_numbers), set(ticket.back_numbers)) for ticket in prediction.tickets],
+        set(actual_draw.front_numbers),
+        set(actual_draw.back_numbers),
+    )
+
+
+def _random_hit_metrics(random_seed: int) -> _HitMetrics:
     rng = Random(random_seed)
     seen: set[tuple[tuple[int, ...], tuple[int, ...]]] = set()
-    totals: list[int] = []
-    actual_front = set(actual_draw.front_numbers)
-    actual_back = set(actual_draw.back_numbers)
-    while len(totals) < 5:
+    tickets: list[tuple[set[int], set[int]]] = []
+    while len(tickets) < 5:
         front = tuple(sorted(rng.sample(range(1, 36), 5)))
         back = tuple(sorted(rng.sample(range(1, 13), 2)))
-        combination = (front, back)
-        if combination in seen:
+        if (front, back) in seen:
             continue
-        seen.add(combination)
-        totals.append(
-            len(set(front).intersection(actual_front)) + len(set(back).intersection(actual_back))
+        seen.add((front, back))
+        tickets.append((set(front), set(back)))
+    # Lottery-number symmetry makes one canonical actual draw valid for every issue.
+    return _calculate_hit_metrics(tickets, set(range(1, 6)), set(range(1, 3)))
+
+
+@lru_cache(maxsize=64)
+def _cached_random_distribution(
+    seed_start: int,
+    seed_count: int,
+) -> tuple[_HitMetrics, ...]:
+    return tuple(_random_hit_metrics(seed_start + offset) for offset in range(seed_count))
+
+
+def clear_random_baseline_cache() -> None:
+    """Clear the in-process Monte Carlo cache (primarily for deterministic tests)."""
+    _cached_random_distribution.cache_clear()
+
+
+def random_baseline_cache_info() -> object:
+    """Expose cache statistics without exposing mutable cached samples."""
+    return _cached_random_distribution.cache_info()
+
+
+def _metric_values(metrics: _HitMetrics) -> dict[str, float]:
+    return {
+        "best_front_hits": float(metrics.best_front_hits),
+        "best_back_hits": float(metrics.best_back_hits),
+        "best_total_hits": float(metrics.best_total_hits),
+        "at_least_three_front": float(metrics.at_least_three_front),
+        "at_least_2_plus_1": float(metrics.at_least_2_plus_1),
+        "front_pool_coverage": float(metrics.front_pool_coverage),
+        "back_pool_coverage": float(metrics.back_pool_coverage),
+        "unique_hit_concentration": metrics.unique_hit_concentration,
+        "ticket_hit_share": metrics.ticket_hit_share,
+    }
+
+
+def _monte_carlo_summaries(
+    distribution: Sequence[_HitMetrics],
+) -> dict[str, RandomMetricSummary]:
+    summaries: dict[str, RandomMetricSummary] = {}
+    for metric in RANDOM_METRICS:
+        values = [_metric_values(sample)[metric] for sample in distribution]
+        mean = fmean(values)
+        standard_error = 0.0 if len(values) < 2 else stdev(values) / len(values) ** 0.5
+        summaries[metric] = RandomMetricSummary(
+            mean=mean,
+            standard_error=standard_error,
+            monte_carlo_error_interval=ConfidenceInterval(
+                method="monte_carlo_normal_error_interval",
+                lower=mean - 1.96 * standard_error,
+                upper=mean + 1.96 * standard_error,
+            ),
         )
-    return max(totals)
+    return summaries
 
 
-def _bootstrap_intervals(
-    values: Sequence[int],
-    *,
-    random_seed: int,
-    resamples: int,
-) -> tuple[float, float, dict[int, tuple[float, float]]]:
-    """Bootstrap 随机均值及各策略命中值的随机百分位 95% 区间。"""
-    sample = np.asarray(values, dtype=float)
-    rng = np.random.default_rng(random_seed)
-    bootstrap_means: list[float] = []
-    bootstrap_percentiles: dict[int, list[float]] = {value: [] for value in range(8)}
-    remaining = resamples
-    while remaining:
-        batch_size = min(remaining, 256)
-        indices = rng.integers(0, len(sample), size=(batch_size, len(sample)))
-        resampled = sample[indices]
-        bootstrap_means.extend(resampled.mean(axis=1).tolist())
-        for value in bootstrap_percentiles:
-            percentiles = (
-                100.0
-                * ((resampled < value).sum(axis=1) + 0.5 * (resampled == value).sum(axis=1))
-                / len(sample)
-            )
-            bootstrap_percentiles[value].extend(percentiles.tolist())
-        remaining -= batch_size
-    lower, upper = np.quantile(bootstrap_means, (0.025, 0.975), method="linear")
-    percentile_intervals = {}
-    for value, percentiles in bootstrap_percentiles.items():
-        percentile_lower, percentile_upper = np.quantile(
-            percentiles,
-            (0.025, 0.975),
-            method="linear",
-        )
-        percentile_intervals[value] = (float(percentile_lower), float(percentile_upper))
-    return float(lower), float(upper), percentile_intervals
-
-
-def _percentile_in_random_distribution(value: int, distribution: Sequence[int]) -> float:
-    """用中秩计算策略值在随机分布中的百分位。"""
+def _percentile_in_distribution(value: float, distribution: Sequence[float]) -> float:
     lower = sum(sample < value for sample in distribution)
     equal = sum(sample == value for sample in distribution)
     return 100.0 * (lower + 0.5 * equal) / len(distribution)
@@ -164,7 +200,6 @@ def _build_schedule(
     prize_table: PrizeTable | None,
     prize_tables: Sequence[PrizeTable] | None,
 ) -> PrizeRuleSchedule | None:
-    """合并兼容参数并构建历史规则时间表。"""
     tables = list(prize_tables or ())
     if prize_table is not None and all(table.version != prize_table.version for table in tables):
         tables.append(prize_table)
@@ -180,12 +215,9 @@ def _evaluate_monetary_result(
     issue_prize_records: Mapping[str, IssuePrizeRecord],
     default_ticket_cost: Decimal,
 ) -> tuple[bool | None, Decimal, Decimal | None, Decimal | None, str | None, bool]:
-    """按该期生效规则计算金额；没有适用规则时只返回成本。"""
     table = None if schedule is None else schedule.table_for_issue(target_draw.issue)
     if table is None:
-        total_cost = default_ticket_cost * len(prediction.tickets)
-        return None, total_cost, None, None, None, False
-
+        return None, default_ticket_cost * len(prediction.tickets), None, None, None, False
     record = issue_prize_records.get(target_draw.issue)
     context_is_known = (
         record is not None or target_draw.issue in prize_contexts or len(table.contexts) == 1
@@ -199,14 +231,7 @@ def _evaluate_monetary_result(
     if record is not None:
         review = apply_issue_prize_record(review, table, record)
     if not context_is_known and review.any_prize:
-        return (
-            review.any_prize,
-            review.total_cost,
-            None,
-            None,
-            table.version,
-            False,
-        )
+        return review.any_prize, review.total_cost, None, None, table.version, False
     available = review.total_prize is not None and review.roi is not None
     return (
         review.any_prize,
@@ -219,7 +244,6 @@ def _evaluate_monetary_result(
 
 
 def _longest_no_prize_streak(results: Sequence[BacktestPeriodResult]) -> int:
-    """计算连续无奖期数；调用方保证 any_prize 均已知。"""
     longest = 0
     current = 0
     for result in results:
@@ -231,16 +255,52 @@ def _longest_no_prize_streak(results: Sequence[BacktestPeriodResult]) -> int:
     return longest
 
 
+def _historical_bootstrap_intervals(
+    results: Sequence[BacktestPeriodResult],
+    *,
+    random_seed: int,
+    resamples: int,
+) -> dict[str, ConfidenceInterval]:
+    metric_rows = [
+        {
+            "best_front_hits": float(result.best_front_hits),
+            "best_back_hits": float(result.best_back_hits),
+            "best_total_hits": float(result.best_total_hits),
+            "at_least_three_front": float(result.at_least_three_front),
+            "at_least_2_plus_1": float(result.at_least_2_plus_1),
+            "front_pool_coverage": float(result.front_pool_coverage),
+            "back_pool_coverage": float(result.back_pool_coverage),
+            "unique_hit_concentration": result.unique_hit_concentration,
+            "ticket_hit_share": result.ticket_hit_share,
+        }
+        for result in results
+    ]
+    rng = np.random.default_rng(random_seed)
+    indices = rng.integers(0, len(results), size=(resamples, len(results)))
+    intervals: dict[str, ConfidenceInterval] = {}
+    for metric in metric_rows[0]:
+        values = np.asarray([row[metric] for row in metric_rows], dtype=float)
+        means = values[indices].mean(axis=1)
+        lower, upper = np.quantile(means, (0.025, 0.975), method="linear")
+        intervals[metric] = ConfidenceInterval(
+            method="cross_historical_period_bootstrap",
+            lower=float(lower),
+            upper=float(upper),
+        )
+    return intervals
+
+
 def _strategy_summaries(
     results: Sequence[BacktestPeriodResult],
+    *,
+    random_seed: int,
+    bootstrap_resamples: int,
 ) -> tuple[BacktestStrategySummary, ...]:
-    """按策略汇总新增命中率、集中度和奖金统计。"""
     grouped: dict[str, list[BacktestPeriodResult]] = defaultdict(list)
     for result in results:
         grouped[result.strategy_name].append(result)
-
     summaries: list[BacktestStrategySummary] = []
-    for strategy_name, strategy_results in grouped.items():
+    for offset, (strategy_name, strategy_results) in enumerate(grouped.items()):
         count = len(strategy_results)
         monetary_complete = all(
             result.prize_data_available and result.total_prize is not None
@@ -260,8 +320,9 @@ def _strategy_summaries(
                 at_least_2_plus_1_rate=(
                     sum(result.at_least_2_plus_1 for result in strategy_results) / count
                 ),
-                hit_concentration_ratio=(
-                    sum(result.hit_concentration_ratio for result in strategy_results) / count
+                ticket_hit_share=fmean(result.ticket_hit_share for result in strategy_results),
+                unique_hit_concentration=fmean(
+                    result.unique_hit_concentration for result in strategy_results
                 ),
                 average_prize=(sum(prizes, Decimal("0")) / count if monetary_complete else None),
                 median_prize=median(prizes) if monetary_complete else None,
@@ -269,6 +330,11 @@ def _strategy_summaries(
                     _longest_no_prize_streak(strategy_results) if prize_flags_known else None
                 ),
                 monetary_metrics_complete=monetary_complete,
+                bootstrap_performance_intervals=_historical_bootstrap_intervals(
+                    strategy_results,
+                    random_seed=random_seed + offset,
+                    resamples=bootstrap_resamples,
+                ),
             )
         )
     return tuple(summaries)
@@ -279,6 +345,7 @@ def run_rolling_backtest(
     prize_table: PrizeTable | None = None,
     *,
     strategies: Mapping[str, StrategyFunction] | None = None,
+    pipeline_configs: Mapping[str, PipelineConfig] | None = None,
     min_history: int = 1,
     base_random_seed: int = 20260000,
     strategy_parameters: Mapping[str, Mapping[str, JsonValue]] | None = None,
@@ -290,22 +357,19 @@ def run_rolling_backtest(
     random_baseline_seed_count: int = 1000,
     bootstrap_resamples: int = 1000,
     default_ticket_cost: Decimal = Decimal("2"),
+    data_quality_report: DataQualityReport | None = None,
 ) -> BacktestReport:
-    """逐期扩展历史窗口，比较策略和至少 1000 个种子的随机分布。
-
-    对索引为 ``N`` 的目标期开奖，只把 ``draws.iloc[:N]`` 交给号码评分器和策略。
-    实际目标期开奖仅在预测生成完成后用于命中和奖金评估，不存在随机时间切分。
-    ROI 只在找到该期已生效规则且奖金金额完整时计算；否则保留命中指标并标为不可用。
-    """
+    """Run strict expanding-window predictions; never expose the target draw to a strategy."""
     if min_history < 1:
-        raise ValueError("min_history 必须至少为 1")
+        raise ValueError("min_history must be at least 1")
     if random_baseline_seed_count < 1000:
-        raise ValueError("每个历史时点的随机 baseline 必须至少运行 1000 个种子")
+        raise ValueError("random baseline must use at least 1000 seeds")
     if bootstrap_resamples < 100:
-        raise ValueError("bootstrap_resamples 必须至少为 100")
+        raise ValueError("bootstrap_resamples must be at least 100")
     if default_ticket_cost <= 0:
-        raise ValueError("default_ticket_cost 必须大于 0")
-
+        raise ValueError("default_ticket_cost must be positive")
+    quality = data_quality_report or generate_data_quality_report(draws)
+    assert_backtest_ready(quality)
     validated = validate_draw_dataframe(draws)
     if min_history >= len(validated):
         return BacktestReport(
@@ -319,6 +383,9 @@ def run_rolling_backtest(
 
     active_strategies = dict(strategies or {})
     active_strategies["random_baseline"] = random_baseline
+    active_pipelines = dict(pipeline_configs or {})
+    if active_pipelines and set(active_pipelines) != {"optimized_portfolio_strategy"}:
+        raise ValueError("pipeline strategy must be named optimized_portfolio_strategy")
     all_parameters = dict(strategy_parameters or {})
     prize_contexts = dict(prize_context_by_issue or {})
     actual_prizes = dict(issue_prize_records or {})
@@ -328,38 +395,40 @@ def run_rolling_backtest(
     )
     results: list[BacktestPeriodResult] = []
     baseline_summaries: list[RandomBaselineSummary] = []
+    baseline_seed_start = base_random_seed + 1_000_000
 
     for target_index in range(min_history, len(validated)):
         history = validated.iloc[:target_index].copy()
         target_draw = _draw_from_row(validated.iloc[target_index])
         cutoff_draw = _draw_from_row(history.iloc[-1])
         if int(cutoff_draw.issue) >= int(target_draw.issue):
-            raise ValueError("滚动切分错误：数据截止期号没有早于目标期号")
-
-        front_scores = dict(number_scorer(history, area="front"))
-        back_scores = dict(number_scorer(history, area="back"))
+            raise ValueError("rolling split cutoff must precede target issue")
         generated_at = _historical_generation_time(cutoff_draw)
-        baseline_seed_start = base_random_seed + target_index * 10_000
-        baseline_distribution = tuple(
-            _random_best_total_hits(target_draw, baseline_seed_start + offset)
-            for offset in range(random_baseline_seed_count)
+
+        cache_before = _cached_random_distribution.cache_info().hits
+        baseline_distribution = _cached_random_distribution(
+            baseline_seed_start,
+            random_baseline_seed_count,
         )
-        ci_lower, ci_upper, percentile_intervals = _bootstrap_intervals(
-            baseline_distribution,
-            random_seed=baseline_seed_start + random_baseline_seed_count,
-            resamples=bootstrap_resamples,
-        )
+        cache_reused = _cached_random_distribution.cache_info().hits > cache_before
         baseline_summaries.append(
             RandomBaselineSummary(
                 target_issue=target_draw.issue,
+                cache_key=f"random-five-v1:{baseline_seed_start}:{random_baseline_seed_count}",
+                cache_reused=cache_reused,
                 seed_start=baseline_seed_start,
                 seed_count=random_baseline_seed_count,
-                mean=sum(baseline_distribution) / len(baseline_distribution),
-                bootstrap_ci_lower=ci_lower,
-                bootstrap_ci_upper=ci_upper,
+                metric_summaries=_monte_carlo_summaries(baseline_distribution),
             )
         )
+        distributions_by_metric = {
+            metric: [_metric_values(sample)[metric] for sample in baseline_distribution]
+            for metric in RANDOM_METRICS
+        }
 
+        front_scores = dict(number_scorer(history, area="front"))
+        back_scores = dict(number_scorer(history, area="back"))
+        predictions: list[tuple[str, int, PredictionRecord]] = []
         for strategy_offset, (strategy_name, strategy) in enumerate(active_strategies.items()):
             random_seed = base_random_seed + target_index * 100 + strategy_offset
             parameters = dict(all_parameters.get(strategy_name, {}))
@@ -373,11 +442,25 @@ def run_rolling_backtest(
                 front_scores=front_scores,
                 back_scores=back_scores,
             )
-            if prediction.strategy_name != strategy_name:
-                raise ValueError("策略映射名称与预测记录 strategy_name 不一致")
-            if prediction.data_cutoff_issue != cutoff_draw.issue:
-                raise ValueError("策略返回了错误的数据截止期号")
+            predictions.append((strategy_name, random_seed, prediction))
+        for pipeline_offset, (strategy_name, config) in enumerate(active_pipelines.items()):
+            random_seed = base_random_seed + target_index * 100 + 50 + pipeline_offset
+            prediction = optimized_portfolio_strategy(
+                history,
+                target_issue=target_draw.issue,
+                generated_at=generated_at,
+                random_seed=random_seed,
+                pipeline_config=config,
+            )
+            predictions.append((strategy_name, random_seed, prediction))
 
+        for strategy_name, random_seed, prediction in predictions:
+            if prediction.strategy_name != strategy_name:
+                raise ValueError(
+                    "strategy mapping name differs from PredictionRecord.strategy_name"
+                )
+            if prediction.data_cutoff_issue != cutoff_draw.issue:
+                raise ValueError("strategy returned an incorrect data cutoff issue")
             hits = _hit_metrics(prediction, target_draw)
             (
                 any_prize,
@@ -394,6 +477,7 @@ def run_rolling_backtest(
                 issue_prize_records=actual_prizes,
                 default_ticket_cost=default_ticket_cost,
             )
+            metric_values = _metric_values(hits)
             results.append(
                 BacktestPeriodResult(
                     target_issue=target_draw.issue,
@@ -405,7 +489,8 @@ def run_rolling_backtest(
                     best_total_hits=hits.best_total_hits,
                     at_least_three_front=hits.at_least_three_front,
                     at_least_2_plus_1=hits.at_least_2_plus_1,
-                    hit_concentration_ratio=hits.hit_concentration_ratio,
+                    ticket_hit_share=hits.ticket_hit_share,
+                    unique_hit_concentration=hits.unique_hit_concentration,
                     any_prize=any_prize,
                     front_pool_coverage=hits.front_pool_coverage,
                     back_pool_coverage=hits.back_pool_coverage,
@@ -415,24 +500,23 @@ def run_rolling_backtest(
                     prize_rule_version=prize_rule_version,
                     prize_data_available=prize_data_available,
                     random_baseline_seed_count=random_baseline_seed_count,
-                    best_total_hits_percentile=_percentile_in_random_distribution(
-                        hits.best_total_hits,
-                        baseline_distribution,
-                    ),
-                    best_total_hits_percentile_ci_lower=percentile_intervals[hits.best_total_hits][
-                        0
-                    ],
-                    best_total_hits_percentile_ci_upper=percentile_intervals[hits.best_total_hits][
-                        1
-                    ],
-                    random_best_total_hits_mean_ci_lower=ci_lower,
-                    random_best_total_hits_mean_ci_upper=ci_upper,
+                    random_metric_percentiles={
+                        metric: _percentile_in_distribution(
+                            metric_values[metric],
+                            distributions_by_metric[metric],
+                        )
+                        for metric in RANDOM_METRICS
+                    },
                 )
             )
 
     return BacktestReport(
         results=tuple(results),
-        strategy_summaries=_strategy_summaries(results),
+        strategy_summaries=_strategy_summaries(
+            results,
+            random_seed=base_random_seed + 2_000_000,
+            bootstrap_resamples=bootstrap_resamples,
+        ),
         random_baseline_summaries=tuple(baseline_summaries),
         includes_random_baseline=True,
         methodology="expanding_window_strictly_before_target_issue",

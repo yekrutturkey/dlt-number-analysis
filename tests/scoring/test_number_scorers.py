@@ -9,6 +9,8 @@ import pytest
 
 from dlt_number_analysis.data import CSV_COLUMNS
 from dlt_number_analysis.scoring import (
+    ScorerSpec,
+    build_number_scorer,
     cumulative_frequency_score,
     hot_cold_blend_score,
     recency_weighted_frequency_score,
@@ -87,3 +89,32 @@ def test_hot_cold_blend_is_finite_bounded_and_seed_free() -> None:
     assert first == second
     assert set(first) == set(range(1, 13))
     assert all(0 <= value <= 1 for value in first.values())
+
+
+def test_scorer_spec_binds_logged_parameters_to_actual_invocation() -> None:
+    history = make_history()
+    spec = ScorerSpec(
+        name="recency_weighted_frequency_score",
+        parameters={"window": 10, "decay": 0.8},
+    )
+
+    scorer = build_number_scorer(spec)
+
+    assert scorer.spec == spec
+    assert scorer(history, area="front") == recency_weighted_frequency_score(
+        history,
+        area="front",
+        window=10,
+        decay=0.8,
+    )
+
+
+def test_scorer_spec_rejects_parameters_not_consumed_by_implementation() -> None:
+    with pytest.raises(ValueError, match="unsupported scorer parameters"):
+        ScorerSpec(name="uniform_score", parameters={"window": 10})
+
+
+def test_scorer_spec_materializes_defaults_for_audit_logs() -> None:
+    spec = ScorerSpec(name="recency_weighted_frequency_score")
+
+    assert spec.parameters == {"window": 30, "decay": 0.93}

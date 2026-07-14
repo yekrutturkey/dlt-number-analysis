@@ -6,7 +6,7 @@
 
 本项目只用于数据工程、统计分析与回测研究，不承诺、暗示或声称能够预测中奖号码。
 
-## v0.3 当前范围
+## v0.4 当前范围
 
 已实现：
 
@@ -24,12 +24,16 @@
 - 十元五注 Portfolio 约束优化、3 注核心/稳健票与 2 注探索票。
 - 每个历史时点至少 1000 个随机种子的 baseline 分布、策略百分位和 Bootstrap 95% 置信区间。
 - 按历史规则生效边界解析奖级；规则或实际奖金缺失时保留命中指标并禁用 ROI。
+- `ScorerSpec` 绑定评分器名称、完整参数和实现版本，日志配置即实际调用配置。
+- 不自动修正冲突的 `append_draws`、`reconcile_sources` 和数据质量阻断接口。
+- 实时生成与滚动回测共用的 `PredictionPipeline`，以及四个 `dlt` CLI 子命令。
+- Python 3.12/3.13 GitHub Actions 质量检查。
 
 尚未实现：
 
-- 自动数据抓取、官方来源交叉核验与增量更新。
+- 自动数据抓取和官方来源联网交叉核验。
 - 完整历史开奖数据集、旧规则配置和按期实际奖金数据。
-- 自动调度的下一期预测、开奖后评估和结果发布。
+- 自动调度、开奖后触发和结果发布。
 - 大样本下的策略参数校准、稳定性结论和可视化报告。
 - 复杂机器学习模型。
 
@@ -44,6 +48,8 @@ uv sync --dev
 uv run ruff format .
 uv run ruff check .
 uv run pytest
+uv lock --check
+git diff --check
 ```
 
 运行测试时不需要网络访问。
@@ -70,7 +76,9 @@ dlt-number-analysis/
 │   ├── evaluation/          # 配置驱动的奖级评估与报告
 │   ├── strategies/          # 五注组合策略及随机 baseline
 │   ├── backtesting/         # 严格向前滚动回测
-│   └── fetchers/            # 独立的数据抓取层（当前仅预留边界）
+│   ├── pipeline/            # 实时与回测共用的端到端 Pipeline
+│   ├── fetchers/            # 独立的数据抓取层（当前仅预留边界）
+│   └── cli.py               # dlt 命令行入口
 └── tests/
     ├── data/
     └── analysis/
@@ -182,7 +190,7 @@ uv run python scripts/generate_26078_review.py
 
 ## 动态结构评分与候选票池
 
-`fit_structure_profile` 从预测时点之前的历史特征拟合经验分布；`score_ticket_structure` 使用经验中位秩中心性逐项评分，不使用固定的和值、跨度或比例“合理区间”。结构项目包括前后区和值、跨度、奇偶、大小、三区、连号、同尾和与上期重号。
+`fit_structure_profile` 从预测时点之前的历史特征拟合经验分布，不使用固定“合理区间”。连续概念 `front_sum`、`front_span`、`back_sum` 使用经验分位数中心性；离散概念使用带 Laplace 平滑的经验频率。奇偶只计算奇数个数，大小只计算大号个数，三区以完整 `zone_signature` 作为一个概念，避免把互补变量重复计权。13 个概念都有显式权重，权重和严格为 1；每项输出保存方法、参数、权重、原始分和加权分。
 
 `generate_candidate_pool` 默认使用一个随机种子生成 10000 注互不相同的合法候选，为每注保存：
 
@@ -190,15 +198,15 @@ uv run python scripts/generate_26078_review.py
 - `structure_score`
 - `combined_ticket_score`
 - 全部静态结构特征和逐项结构分数
-- 评分器名称、参数、原始号码分、历史截止期号、生成时间和随机种子
+- 不可与实际调用分离的 `ScorerSpec`、原始号码分、历史截止期号、生成时间和随机种子
 
 `write_candidate_score_details` / `load_candidate_score_details` 使用 JSONL 保存和读取完整评分明细。候选评分仅用于组合排序，评分不等于真实中奖概率。
 
 ## 五注 Portfolio 与原有组合策略
 
-`optimize_portfolio` 在 10 元、5 注预算下执行带种子的可重复搜索。默认硬约束包括前区总池 16–20 个、任意两注前区交集不超过 2、后区组合不重复、至少覆盖 3 个历史动态和值区间和 3 种三区结构，并输出 3 注核心/稳健票和 2 注探索票。
+`optimize_portfolio` 在 10 元、5 注预算下执行带种子的可重复搜索。默认前区号码池范围为 16–21，目标池大小为 18；池大小得分按偏离目标的距离计算，不再简单奖励号码池越大越好。任意两注前区交集不超过 2，后区组合不重复，至少覆盖 3 个历史动态和值区间和 3 种三区结构，并输出 3 注核心/稳健票和 2 注探索票。
 
-“核心号码”在当前实现中是显式指定的 2–3 个核心：各出现 2 次，最多 1 个可出现 3 次。由于 25 个前区位置与 16–20 个号码池在数学上还需要其他重号，非核心号码允许偶然重复；这些重复会进入过度重复惩罚，但不会自动升级为核心。目标函数保存以下明细：
+所有出现至少 2 次的前区号码都必须分类：2–3 个核心号码出现 2–3 次，2–4 个支撑号码最多出现 2 次，其余探索号码只出现 1 次，任意号码最多出现 3 次。`core_concentration` 同时评估核心覆盖、次数合规、三张稳健票覆盖和核心出现位置，不会仅因合法的核心轮转重复而扣分。目标函数保存以下明细：
 
 - 单票分数
 - 组合多样性
@@ -224,6 +232,8 @@ uv run python scripts/generate_26078_review.py
 - `best_front_hits`
 - `best_back_hits`
 - `best_total_hits`
+- `ticket_hit_share`
+- `unique_hit_concentration`
 - `any_prize`
 - `front_pool_coverage`
 - `back_pool_coverage`
@@ -235,12 +245,32 @@ uv run python scripts/generate_26078_review.py
 
 - `at_least_three_front_rate`
 - `at_least_2_plus_1_rate`
-- `hit_concentration_ratio`
+- `ticket_hit_share`
+- `unique_hit_concentration`
 - `average_prize`
 - `median_prize`
 - `longest_no_prize_streak`
 
-每个历史目标期使用至少 1000 个种子模拟均匀随机五注，输出策略 `best_total_hits` 在随机分布中的中秩百分位、该百分位的非参数 Bootstrap 95% 置信区间，以及随机均值的 Bootstrap 95% 置信区间。百分位和置信区间只描述回测样本，不代表未来中奖概率。
+完全随机五注对 8 项命中/覆盖指标生成至少 1000 个种子的分布；彩票号码标签对称，因此相同种子配置的分布在进程内缓存，不按期重复模拟。随机分布均值输出明确标为 Monte Carlo 误差的 95% 区间；策略跨历史期次的性能另用 Bootstrap 95% 区间，两者不可混用。百分位和区间只描述模拟或历史样本，不代表未来中奖概率。
+
+### v0.3 指标迁移
+
+`hit_concentration_ratio` 自 v0.4 更名为 `ticket_hit_share`，含义仍是“最佳单票命中数 / 所有票逐票命中数之和”。模型读取时兼容旧字段名，但新 JSON 只写出 `ticket_hit_share`。新增 `unique_hit_concentration = best_total_hits / (front_pool_coverage + back_pool_coverage)`；号码池无命中时为 0。后者按唯一命中号码计分，不会因为同一核心号码在多注中重复命中而人为降低集中度。
+
+## 端到端 Pipeline 与 CLI
+
+`PredictionPipeline` 的固定流程为：历史数据 → 号码评分 → 历史结构画像 → 至少 10000 注候选池 → 五注 Portfolio 优化 → `PredictionRecord`。`optimized_portfolio_strategy` 在滚动回测中接收目标期之前的完整扩展窗口；`generate-next` 使用同一个 Pipeline。
+
+```powershell
+uv run dlt validate-data
+uv run dlt run-backtest
+uv run dlt generate-next
+uv run dlt evaluate-latest
+```
+
+`generate-next` 制品保存目标期号、数据截止期号、带时区生成时间、Git commit SHA、完整 Pipeline 配置、全部随机种子、候选池摘要、最终 5 注和固定风险声明。默认回测只运行轻量随机 baseline；传入 `--include-optimized` 才逐历史期运行至少 10000 注候选的优化 Pipeline。
+
+`reconcile_sources` 只报告冲突，不选择“更可信”的值；存在任何冲突时不返回可用于回测的合并表。`generate_data_quality_report` 的 `blocks_backtest=true` 会使滚动回测立即停止，必须人工核实并重新提供一致数据。
 
 ## 历史规则与 ROI 边界
 

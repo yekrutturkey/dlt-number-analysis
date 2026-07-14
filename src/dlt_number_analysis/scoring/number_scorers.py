@@ -3,16 +3,73 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from math import isfinite
 from typing import Literal, Protocol
 
 import pandas as pd
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationInfo, field_validator
 
 from dlt_number_analysis.data import BACK_COLUMNS, FRONT_COLUMNS
 from dlt_number_analysis.data.data_validator import validate_draw_dataframe
 
 NumberArea = Literal["front", "back"]
 RECENCY_WINDOWS: tuple[int, int, int] = (10, 30, 100)
+NUMBER_SCORER_VERSION = "number-scorer-v1"
+ScorerName = Literal[
+    "uniform_score",
+    "cumulative_frequency_score",
+    "recency_weighted_frequency_score",
+    "hot_cold_blend_score",
+]
+
+
+class ScorerSpec(BaseModel):
+    """A versioned scorer configuration that is also the invocation source of truth."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    name: ScorerName
+    parameters: dict[str, JsonValue] = Field(default_factory=dict)
+    version: str = NUMBER_SCORER_VERSION
+
+    @field_validator("parameters", mode="before")
+    @classmethod
+    def resolve_parameters(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> dict[str, JsonValue]:
+        """Fill implementation defaults and reject parameters the scorer will not consume."""
+        if not isinstance(value, Mapping):
+            raise ValueError("parameters must be a mapping")
+        name = info.data.get("name")
+        supplied = dict(value)
+        defaults: dict[str, dict[str, JsonValue]] = {
+            "uniform_score": {},
+            "cumulative_frequency_score": {},
+            "recency_weighted_frequency_score": {"window": 30, "decay": 0.93},
+            "hot_cold_blend_score": {
+                "hot_window": 10,
+                "cold_window": 100,
+                "hot_weight": 0.65,
+                "decay": 0.93,
+            },
+        }
+        if name not in defaults:
+            return supplied
+        unknown = set(supplied).difference(defaults[name])
+        if unknown:
+            raise ValueError(f"unsupported scorer parameters: {sorted(unknown)}")
+        return {**defaults[name], **supplied}
+
+    @field_validator("version")
+    @classmethod
+    def validate_version(cls, value: str) -> str:
+        """Only bind specs to an implementation version available in this package."""
+        if value != NUMBER_SCORER_VERSION:
+            raise ValueError(f"unsupported scorer version: {value}")
+        return value
 
 
 class NumberScorer(Protocol):
@@ -24,6 +81,63 @@ class NumberScorer(Protocol):
         *,
         area: NumberArea,
     ) -> Mapping[int, float]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class BoundNumberScorer:
+    """Callable scorer whose audit spec is inseparable from its behavior."""
+
+    spec: ScorerSpec
+
+    def __call__(self, history: pd.DataFrame, *, area: NumberArea) -> Mapping[int, float]:
+        parameters = dict(self.spec.parameters)
+        if self.spec.name == "uniform_score":
+            return uniform_score(history, area=area)
+        if self.spec.name == "cumulative_frequency_score":
+            return cumulative_frequency_score(history, area=area)
+        if self.spec.name == "recency_weighted_frequency_score":
+            return recency_weighted_frequency_score(
+                history,
+                area=area,
+                window=int(parameters["window"]),
+                decay=float(parameters["decay"]),
+            )
+        return hot_cold_blend_score(
+            history,
+            area=area,
+            hot_window=int(parameters["hot_window"]),
+            cold_window=int(parameters["cold_window"]),
+            hot_weight=float(parameters["hot_weight"]),
+            decay=float(parameters["decay"]),
+        )
+
+
+def build_number_scorer(spec: ScorerSpec) -> BoundNumberScorer:
+    """Build the exact scorer described by ``spec`` after validating its parameters."""
+    bound = BoundNumberScorer(spec=spec)
+    # Exercise scalar validation without consuming or depending on any history.
+    parameters = spec.parameters
+    if spec.name == "recency_weighted_frequency_score":
+        window = int(parameters["window"])
+        decay = float(parameters["decay"])
+        if window not in RECENCY_WINDOWS:
+            raise ValueError(f"window must be one of {RECENCY_WINDOWS}")
+        if not 0 < decay <= 1 or not isfinite(decay):
+            raise ValueError("decay must be finite and in (0, 1]")
+    elif spec.name == "hot_cold_blend_score":
+        hot_window = int(parameters["hot_window"])
+        cold_window = int(parameters["cold_window"])
+        hot_weight = float(parameters["hot_weight"])
+        decay = float(parameters["decay"])
+        if hot_window not in RECENCY_WINDOWS or cold_window not in RECENCY_WINDOWS:
+            raise ValueError(f"windows must come from {RECENCY_WINDOWS}")
+        if hot_window > cold_window:
+            raise ValueError("hot_window must not exceed cold_window")
+        if not 0 <= hot_weight <= 1 or not isfinite(hot_weight):
+            raise ValueError("hot_weight must be finite and in [0, 1]")
+        if not 0 < decay <= 1 or not isfinite(decay):
+            raise ValueError("decay must be finite and in (0, 1]")
+    return bound
 
 
 def _area_definition(area: NumberArea) -> tuple[tuple[str, ...], int]:

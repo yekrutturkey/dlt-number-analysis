@@ -8,17 +8,20 @@ from random import Random
 
 import pandas as pd
 import pytest
+from pydantic import ValidationError
 
 from dlt_number_analysis import DISCLAIMER
 from dlt_number_analysis.data import CSV_COLUMNS
 from dlt_number_analysis.portfolio import (
     CandidatePool,
+    PortfolioConstraints,
+    PortfolioSelection,
     generate_candidate_pool,
     load_candidate_score_details,
     optimize_portfolio,
     write_candidate_score_details,
 )
-from dlt_number_analysis.scoring import recency_weighted_frequency_score
+from dlt_number_analysis.scoring import ScorerSpec, recency_weighted_frequency_score
 
 
 def make_history(count: int = 80) -> pd.DataFrame:
@@ -52,9 +55,19 @@ def candidate_pool() -> CandidatePool:
         target_issue="26081",
         generated_at=datetime(2026, 7, 18, tzinfo=UTC),
         random_seed=26081,
-        number_scorer=thirty_period_scorer,
-        scorer_name="recency_weighted_frequency_score",
-        scorer_parameters={"window": 30, "decay": 0.93},
+        scorer_spec=ScorerSpec(
+            name="recency_weighted_frequency_score",
+            parameters={"window": 30, "decay": 0.93},
+        ),
+    )
+
+
+@pytest.fixture(scope="module")
+def portfolio_selection(candidate_pool: CandidatePool) -> PortfolioSelection:
+    return optimize_portfolio(
+        candidate_pool,
+        random_seed=20260718,
+        search_trials=8_000,
     )
 
 
@@ -74,16 +87,18 @@ def test_candidate_pool_has_at_least_ten_thousand_unique_scored_tickets(
     assert candidate_pool.random_seed == 26081
     assert candidate_pool.data_cutoff_issue == str(make_history().iloc[-1]["issue"])
     assert candidate_pool.scorer_parameters["window"] == 30
+    assert candidate_pool.scorer_spec.name == "recency_weighted_frequency_score"
     assert candidate_pool.risk_disclaimer == DISCLAIMER
     first = candidate_pool.candidates[0]
     assert 0 <= first.number_score <= 1
     assert 0 <= first.structure_score <= 1
     assert 0 <= first.combined_ticket_score <= 1
     assert first.structure_component_scores
+    assert first.structure_component_details
 
 
 def test_candidate_pool_rejects_fewer_than_ten_thousand() -> None:
-    with pytest.raises(ValueError, match="至少"):
+    with pytest.raises(ValueError, match="at least"):
         generate_candidate_pool(
             make_history(),
             target_issue="26081",
@@ -107,16 +122,12 @@ def test_candidate_score_details_round_trip(
 
 
 def test_portfolio_optimizer_satisfies_all_default_constraints(
-    candidate_pool: CandidatePool,
+    portfolio_selection: PortfolioSelection,
 ) -> None:
-    selection = optimize_portfolio(
-        candidate_pool,
-        random_seed=20260718,
-        search_trials=8_000,
-    )
+    selection = portfolio_selection
 
     assert len(selection.tickets) == 5
-    assert 16 <= selection.front_pool_size <= 20
+    assert 16 <= selection.front_pool_size <= 21
     assert len({ticket.back_numbers for ticket in selection.tickets}) == 5
     assert len({ticket.sum_interval for ticket in selection.tickets}) >= 3
     assert len({ticket.zone_structure for ticket in selection.tickets}) >= 3
@@ -130,9 +141,168 @@ def test_portfolio_optimizer_satisfies_all_default_constraints(
     assert 2 <= len(selection.core_front_numbers) <= 3
     assert all(counts[number] in (2, 3) for number in selection.core_front_numbers)
     assert sum(counts[number] == 3 for number in selection.core_front_numbers) <= 1
+    assert 2 <= len(selection.support_front_numbers) <= 4
+    assert all(counts[number] == 2 for number in selection.support_front_numbers)
+    repeated = {number for number, count in counts.items() if count >= 2}
+    assert repeated == set(selection.core_front_numbers).union(selection.support_front_numbers)
+    assert max(counts.values()) <= 3
     assert selection.risk_disclaimer == DISCLAIMER
 
     prediction = selection.to_prediction_record()
     assert prediction.random_seed == 20260718
     assert prediction.parameters["constraints"]["total_budget"] == 10.0
     assert prediction.risk_disclaimer == DISCLAIMER
+
+
+def test_portfolio_defaults_use_target_pool_not_largest_pool_reward() -> None:
+    constraints = PortfolioConstraints()
+
+    assert constraints.min_front_pool_size == 16
+    assert constraints.target_front_pool_size == 18
+    assert constraints.max_front_pool_size == 21
+
+
+def test_hard_constraint_rejects_repeated_back_combination(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    payload["tickets"][1]["back_numbers"] = payload["tickets"][0]["back_numbers"]
+
+    with pytest.raises(ValidationError, match="back combinations must not repeat"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_rejects_pairwise_front_overlap_above_two(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    payload["tickets"][1]["front_numbers"] = payload["tickets"][0]["front_numbers"]
+
+    with pytest.raises(ValidationError, match="pairwise front overlap"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_requires_every_repeat_to_be_classified(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    payload["support_front_numbers"] = payload["support_front_numbers"][1:]
+
+    with pytest.raises(ValidationError, match="every repeated number"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_rejects_wrong_stable_exploration_split(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    payload["tickets"][0]["ticket_role"] = "exploration"
+
+    with pytest.raises(ValidationError, match="stable ticket count"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_rejects_insufficient_structure_coverage(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    for ticket in payload["tickets"]:
+        ticket["sum_interval"] = "one_interval"
+
+    with pytest.raises(ValidationError, match="sum interval coverage"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_rejects_insufficient_zone_coverage(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    for ticket in payload["tickets"]:
+        ticket["zone_structure"] = "one_zone_signature"
+
+    with pytest.raises(ValidationError, match="zone structure coverage"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_rejects_pool_outside_configured_range(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    pool_size = payload["front_pool_size"]
+    payload["constraints"]["min_front_pool_size"] = 5
+    payload["constraints"]["max_front_pool_size"] = pool_size - 1
+    payload["constraints"]["target_front_pool_size"] = pool_size - 1
+
+    with pytest.raises(ValidationError, match="front pool size"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_rejects_more_than_three_occurrences(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    payload["tickets"][3]["front_numbers"] = (9, 18, 21, 27, 28)
+    payload["front_pool_size"] = len(
+        {number for ticket in payload["tickets"] for number in ticket["front_numbers"]}
+    )
+
+    with pytest.raises(ValidationError, match="maximum occurrence"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_rejects_core_occurrence_below_configured_minimum(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    payload["constraints"]["core_min_occurrences"] = 3
+
+    with pytest.raises(ValidationError, match="core front number occurrences"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_rejects_too_many_core_numbers(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    payload["constraints"]["max_core_front_numbers"] = 2
+
+    with pytest.raises(ValidationError, match="core front number count"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_rejects_too_many_support_numbers(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    payload["constraints"]["max_support_front_numbers"] = 2
+
+    with pytest.raises(ValidationError, match="support front number count"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_rejects_support_number_above_two_occurrences(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    payload["tickets"][1]["front_numbers"] = (9, 21, 22, 25, 35)
+    payload["front_pool_size"] = len(
+        {number for ticket in payload["tickets"] for number in ticket["front_numbers"]}
+    )
+
+    with pytest.raises(ValidationError, match="support front number occurrences"):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_hard_constraint_rejects_wrong_ticket_count(
+    portfolio_selection: PortfolioSelection,
+) -> None:
+    payload = portfolio_selection.model_dump()
+    payload["tickets"] = payload["tickets"][:4]
+
+    with pytest.raises(ValidationError):
+        PortfolioSelection.model_validate(payload)
+
+
+def test_constraint_model_rejects_budget_mismatch() -> None:
+    with pytest.raises(ValidationError, match="total budget"):
+        PortfolioConstraints(total_budget=12)

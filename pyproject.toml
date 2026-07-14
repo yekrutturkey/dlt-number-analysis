@@ -1,6 +1,6 @@
 [project]
 name = "dlt-number-analysis"
-version = "0.3.0"
+version = "0.4.0"
 description = "中国体育彩票超级大乐透历史数据分析与滚动回测工具"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -11,6 +11,9 @@ dependencies = [
     "pydantic>=2.13.4",
     "scipy>=1.18.0",
 ]
+
+[project.scripts]
+dlt = "dlt_number_analysis.cli:main"
 
 [dependency-groups]
 dev = [

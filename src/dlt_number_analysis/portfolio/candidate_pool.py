@@ -1,4 +1,4 @@
-"""带种子的合法候选票生成、动态评分和明细持久化。"""
+"""Seeded legal candidate generation with bound scorer configuration and audit details."""
 
 from __future__ import annotations
 
@@ -10,15 +10,15 @@ from pathlib import Path
 from random import Random
 
 import pandas as pd
-from pydantic import JsonValue
 
 from dlt_number_analysis.data import CSV_COLUMNS, DrawRecord
 from dlt_number_analysis.data.data_validator import validate_draw_dataframe
 from dlt_number_analysis.portfolio.models import CandidatePool, CandidateTicketScore
 from dlt_number_analysis.scoring import (
-    NumberScorer,
+    HistoricalStructureProfile,
+    ScorerSpec,
+    build_number_scorer,
     compute_ticket_structure,
-    cumulative_frequency_score,
     fit_structure_profile,
     score_ticket_structure,
 )
@@ -27,12 +27,11 @@ MINIMUM_CANDIDATE_COUNT = 10_000
 
 
 def _normalize_scores(scores: Mapping[int, float], maximum: int) -> dict[int, float]:
-    """校验完整号码空间并缩放到 0–1。"""
     expected = set(range(1, maximum + 1))
     if set(scores) != expected:
-        raise ValueError(f"号码评分必须完整覆盖 1 到 {maximum}")
+        raise ValueError(f"number scores must cover every value from 1 to {maximum}")
     if any(not isfinite(float(value)) for value in scores.values()):
-        raise ValueError("号码评分必须是有限数值")
+        raise ValueError("number scores must be finite")
     minimum = min(float(value) for value in scores.values())
     maximum_score = max(float(value) for value in scores.values())
     if minimum == maximum_score:
@@ -43,16 +42,8 @@ def _normalize_scores(scores: Mapping[int, float], maximum: int) -> dict[int, fl
 
 
 def _draw_from_last_row(history: pd.DataFrame) -> DrawRecord:
-    """把历史窗口最后一行恢复为 DrawRecord。"""
     row = history.iloc[-1]
     return DrawRecord.model_validate({column: row[column] for column in CSV_COLUMNS})
-
-
-def _resolve_scorer_name(number_scorer: NumberScorer, scorer_name: str | None) -> str:
-    """为普通函数、partial 或可调用对象生成稳定名称。"""
-    if scorer_name:
-        return scorer_name
-    return str(getattr(number_scorer, "__name__", number_scorer.__class__.__name__))
 
 
 def generate_candidate_pool(
@@ -61,46 +52,54 @@ def generate_candidate_pool(
     target_issue: str,
     generated_at: datetime,
     random_seed: int,
-    number_scorer: NumberScorer = cumulative_frequency_score,
-    scorer_name: str | None = None,
-    scorer_parameters: Mapping[str, JsonValue] | None = None,
+    scorer_spec: ScorerSpec | None = None,
+    structure_profile: HistoricalStructureProfile | None = None,
+    structure_feature_weights: Mapping[str, float] | None = None,
+    laplace_alpha: float = 1.0,
     candidate_count: int = MINIMUM_CANDIDATE_COUNT,
     front_number_weight: float = 5 / 7,
     back_number_weight: float = 2 / 7,
     number_score_weight: float = 0.5,
     structure_score_weight: float = 0.5,
 ) -> CandidatePool:
-    """生成至少一万注不重复合法候选，并保存号码、结构和综合评分。"""
+    """Generate at least 10,000 unique legal tickets from pre-target history."""
     if candidate_count < MINIMUM_CANDIDATE_COUNT:
-        raise ValueError(f"candidate_count 必须至少为 {MINIMUM_CANDIDATE_COUNT}")
+        raise ValueError(f"candidate_count must be at least {MINIMUM_CANDIDATE_COUNT}")
     if generated_at.tzinfo is None or generated_at.utcoffset() is None:
-        raise ValueError("generated_at 必须包含时区")
-    if any(
-        not isfinite(weight) or weight < 0
-        for weight in (
-            front_number_weight,
-            back_number_weight,
-            number_score_weight,
-            structure_score_weight,
-        )
-    ):
-        raise ValueError("评分权重必须是非负有限数值")
+        raise ValueError("generated_at must include a timezone")
+    weights = (
+        front_number_weight,
+        back_number_weight,
+        number_score_weight,
+        structure_score_weight,
+    )
+    if any(not isfinite(weight) or weight < 0 for weight in weights):
+        raise ValueError("candidate scoring weights must be finite and non-negative")
     if front_number_weight + back_number_weight <= 0:
-        raise ValueError("前后区号码评分权重之和必须大于 0")
+        raise ValueError("front/back number score weights must sum above zero")
     if number_score_weight + structure_score_weight <= 0:
-        raise ValueError("号码与结构评分权重之和必须大于 0")
+        raise ValueError("number/structure score weights must sum above zero")
 
     validated = validate_draw_dataframe(history)
     cutoff_issue = str(validated.iloc[-1]["issue"])
     if int(cutoff_issue) >= int(target_issue):
-        raise ValueError("候选票池只能使用目标期开奖前的数据")
+        raise ValueError("candidate generation may only use draws before the target issue")
     previous_draw = _draw_from_last_row(validated)
-    profile = fit_structure_profile(validated)
-    raw_front_scores = dict(number_scorer(validated, area="front"))
-    raw_back_scores = dict(number_scorer(validated, area="back"))
+    profile = structure_profile or fit_structure_profile(
+        validated,
+        feature_weights=structure_feature_weights,
+        laplace_alpha=laplace_alpha,
+    )
+    if profile.data_cutoff_issue != cutoff_issue:
+        raise ValueError("structure profile cutoff does not match candidate history cutoff")
+
+    resolved_spec = scorer_spec or ScorerSpec(name="cumulative_frequency_score")
+    scorer = build_number_scorer(resolved_spec)
+    raw_front_scores = dict(scorer(validated, area="front"))
+    raw_back_scores = dict(scorer(validated, area="back"))
     front_scores = _normalize_scores(raw_front_scores, 35)
     back_scores = _normalize_scores(raw_back_scores, 12)
-    front_weight_total = front_number_weight + back_number_weight
+    area_weight_total = front_number_weight + back_number_weight
     combined_weight_total = number_score_weight + structure_score_weight
 
     rng = Random(random_seed)
@@ -116,11 +115,11 @@ def generate_candidate_pool(
 
         features = compute_ticket_structure(front, back, previous_draw=previous_draw)
         structure = score_ticket_structure(features, profile)
-        front_number_score = sum(front_scores[number] for number in front) / len(front)
-        back_number_score = sum(back_scores[number] for number in back) / len(back)
+        front_score = sum(front_scores[number] for number in front) / len(front)
+        back_score = sum(back_scores[number] for number in back) / len(back)
         number_score = (
-            front_number_weight * front_number_score + back_number_weight * back_number_score
-        ) / front_weight_total
+            front_number_weight * front_score + back_number_weight * back_score
+        ) / area_weight_total
         combined_score = (
             number_score_weight * number_score + structure_score_weight * structure.overall_score
         ) / combined_weight_total
@@ -131,25 +130,24 @@ def generate_candidate_pool(
                 front_numbers=front,
                 back_numbers=back,
                 features=features,
-                front_number_score=front_number_score,
-                back_number_score=back_number_score,
+                front_number_score=front_score,
+                back_number_score=back_score,
                 number_score=number_score,
                 structure_score=structure.overall_score,
                 combined_ticket_score=combined_score,
                 structure_component_scores=structure.component_scores,
+                structure_component_details=structure.component_details,
                 sum_interval=profile.front_sum_interval(features.front_sum),
                 zone_structure=features.zone_signature,
             )
         )
 
-    resolved_name = _resolve_scorer_name(number_scorer, scorer_name)
     return CandidatePool(
         target_issue=target_issue,
         data_cutoff_issue=cutoff_issue,
         generated_at=generated_at,
         random_seed=random_seed,
-        scorer_name=resolved_name,
-        scorer_parameters=dict(scorer_parameters or {}),
+        scorer_spec=resolved_spec,
         generation_parameters={
             "candidate_count": candidate_count,
             "sampling_method": "seeded_uniform_without_replacement_within_ticket",
@@ -158,10 +156,9 @@ def generate_candidate_pool(
             "back_number_weight": back_number_weight,
             "number_score_weight": number_score_weight,
             "structure_score_weight": structure_score_weight,
-            "structure_scoring_method": profile.scoring_method,
-            "structure_profile_start_issue": profile.data_start_issue,
-            "structure_profile_cutoff_issue": profile.data_cutoff_issue,
-            "front_sum_quantile_edges": list(profile.front_sum_quantile_edges),
+            "structure_profile": profile.model_dump(
+                mode="json", exclude={"continuous_distributions", "discrete_frequencies"}
+            ),
             "raw_front_scores": {
                 str(number): float(score) for number, score in sorted(raw_front_scores.items())
             },
@@ -174,7 +171,7 @@ def generate_candidate_pool(
 
 
 def write_candidate_score_details(pool: CandidatePool, path: str | Path) -> Path:
-    """以 JSONL 保存候选池元数据和每注评分明细。"""
+    """Persist pool metadata and every candidate score as UTF-8 JSONL."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     metadata = pool.model_dump(mode="json", exclude={"candidates"})
@@ -195,16 +192,16 @@ def write_candidate_score_details(pool: CandidatePool, path: str | Path) -> Path
 
 
 def load_candidate_score_details(path: str | Path) -> CandidatePool:
-    """读取并完整校验候选评分 JSONL。"""
+    """Load and validate a candidate-score JSONL artifact."""
     source = Path(path)
     records = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines() if line]
     if not records or records[0].pop("record_type", None) != "candidate_pool_metadata":
-        raise ValueError("候选评分文件缺少元数据记录")
+        raise ValueError("candidate score file is missing its metadata record")
     candidates = []
     for record in records[1:]:
         if record.pop("record_type", None) != "candidate_score":
-            raise ValueError("候选评分文件包含未知记录类型")
+            raise ValueError("candidate score file contains an unknown record type")
         if record.pop("risk_disclaimer", None) != records[0]["risk_disclaimer"]:
-            raise ValueError("候选评分记录缺少固定风险声明")
+            raise ValueError("candidate score record is missing the fixed disclaimer")
         candidates.append(record)
     return CandidatePool.model_validate({**records[0], "candidates": candidates})

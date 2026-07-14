@@ -5,6 +5,7 @@ from random import Random
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from dlt_number_analysis import DISCLAIMER
 from dlt_number_analysis.data import CSV_COLUMNS, DrawRecord
@@ -87,3 +88,50 @@ def test_structure_score_saves_each_empirical_component() -> None:
     assert "front_repeat_from_previous_count" in result.component_scores
     assert "back_consecutive_pair_count" in result.component_scores
     assert result.risk_disclaimer == DISCLAIMER
+
+
+def test_structure_profile_has_non_duplicated_concepts_and_normalized_weights() -> None:
+    profile = fit_structure_profile(make_history())
+    definitions = {item.name: item for item in profile.feature_definitions}
+
+    assert set(definitions) == {
+        "front_sum",
+        "front_span",
+        "front_odd_count",
+        "front_large_count",
+        "front_zone_signature",
+        "front_consecutive_pair_count",
+        "front_same_tail_pair_count",
+        "front_repeat_from_previous_count",
+        "back_sum",
+        "back_odd_count",
+        "back_large_count",
+        "back_consecutive_pair_count",
+        "back_repeat_from_previous_count",
+    }
+    assert "front_even_count" not in definitions
+    assert "front_small_count" not in definitions
+    assert sum(item.weight for item in definitions.values()) == pytest.approx(1.0)
+    assert definitions["front_sum"].method == "empirical_quantile_centrality"
+    assert definitions["front_zone_signature"].method == "laplace_smoothed_empirical_frequency"
+
+
+def test_structure_score_persists_method_parameters_and_weight_per_component() -> None:
+    history = make_history()
+    profile = fit_structure_profile(history, laplace_alpha=2.0)
+    features = compute_ticket_structure(
+        [2, 13, 20, 25, 32],
+        [8, 11],
+        previous_draw=last_draw(history),
+    )
+
+    result = score_ticket_structure(features, profile)
+
+    continuous = result.component_details["front_sum"]
+    discrete = result.component_details["front_zone_signature"]
+    assert continuous.method == "empirical_quantile_centrality"
+    assert continuous.parameters["history_observations"] == len(history)
+    assert discrete.method == "laplace_smoothed_empirical_frequency"
+    assert discrete.parameters["alpha"] == 2.0
+    assert discrete.score > 0
+    assert sum(item.weight for item in result.component_details.values()) == pytest.approx(1.0)

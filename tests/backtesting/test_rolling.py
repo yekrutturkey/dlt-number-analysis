@@ -10,7 +10,11 @@ import pytest
 from pydantic import JsonValue
 
 from dlt_number_analysis import DISCLAIMER
-from dlt_number_analysis.backtesting import run_rolling_backtest
+from dlt_number_analysis.backtesting import (
+    BacktestPeriodResult,
+    clear_random_baseline_cache,
+    run_rolling_backtest,
+)
 from dlt_number_analysis.data import CSV_COLUMNS
 from dlt_number_analysis.evaluation import IssuePrizeRecord, load_prize_table
 from dlt_number_analysis.models import PredictionRecord, TicketRecord
@@ -74,6 +78,7 @@ def fixed_strategy(
 
 
 def test_rolling_backtest_outputs_requested_metrics_and_random_baseline() -> None:
+    clear_random_baseline_cache()
     report = run_rolling_backtest(
         make_draws(),
         load_prize_table(PRIZE_TABLE_PATH),
@@ -101,22 +106,113 @@ def test_rolling_backtest_outputs_requested_metrics_and_random_baseline() -> Non
     assert fixed_26016.best_total_hits == 3
     assert fixed_26016.at_least_three_front is False
     assert fixed_26016.at_least_2_plus_1 is True
-    assert fixed_26016.hit_concentration_ratio == pytest.approx(0.6)
+    assert fixed_26016.ticket_hit_share == pytest.approx(0.6)
+    assert fixed_26016.hit_concentration_ratio == fixed_26016.ticket_hit_share
+    assert fixed_26016.unique_hit_concentration == pytest.approx(0.6)
     assert fixed_26016.any_prize is True
     assert fixed_26016.total_cost == Decimal("10")
     assert fixed_26016.total_prize == Decimal("5")
     assert fixed_26016.roi == Decimal("-0.5")
     assert fixed_26016.random_baseline_seed_count == 1000
-    assert 0 <= fixed_26016.best_total_hits_percentile <= 100
-    assert (
-        fixed_26016.best_total_hits_percentile_ci_lower
-        <= fixed_26016.best_total_hits_percentile_ci_upper
-    )
+    assert 0 <= fixed_26016.random_metric_percentiles["best_total_hits"] <= 100
+    assert set(fixed_26016.random_metric_percentiles) == {
+        "best_front_hits",
+        "best_back_hits",
+        "best_total_hits",
+        "at_least_three_front",
+        "at_least_2_plus_1",
+        "front_pool_coverage",
+        "back_pool_coverage",
+        "unique_hit_concentration",
+    }
     assert report.random_baseline_summaries[0].seed_count == 1000
+    assert report.random_baseline_summaries[0].cache_reused is False
+    assert report.random_baseline_summaries[1].cache_reused is True
+    assert (
+        report.random_baseline_summaries[0]
+        .metric_summaries["best_total_hits"]
+        .monte_carlo_error_interval.method
+        == "monte_carlo_normal_error_interval"
+    )
     fixed_summary = next(
         summary for summary in report.strategy_summaries if summary.strategy_name == "fixed"
     )
     assert fixed_summary.period_count == 2
+    assert (
+        fixed_summary.bootstrap_performance_intervals["best_total_hits"].method
+        == "cross_historical_period_bootstrap"
+    )
+
+
+def test_legacy_hit_concentration_input_migrates_to_ticket_hit_share() -> None:
+    report = run_rolling_backtest(
+        make_draws().iloc[:3].copy(),
+        strategies={"fixed": fixed_strategy},
+        min_history=2,
+    )
+    result = next(item for item in report.results if item.strategy_name == "fixed")
+    payload = result.model_dump()
+    old_value = payload.pop("ticket_hit_share")
+    payload["hit_concentration_ratio"] = old_value
+
+    migrated = BacktestPeriodResult.model_validate(payload)
+
+    assert migrated.ticket_hit_share == old_value
+    assert "hit_concentration_ratio" not in migrated.model_dump()
+
+
+def test_repeated_core_hits_do_not_reduce_unique_hit_concentration() -> None:
+    def repeated_core_strategy(**kwargs: object) -> PredictionRecord:
+        prediction = fixed_strategy(**kwargs)  # type: ignore[arg-type]
+        tickets = list(prediction.tickets)
+        replacements = (
+            (1, 2, 6, 7, 8),
+            (1, 10, 14, 19, 24),
+            (1, 15, 20, 25, 29),
+        )
+        for index, front in enumerate(replacements):
+            tickets[index] = tickets[index].model_copy(update={"front_numbers": front})
+        return prediction.model_copy(update={"tickets": tuple(tickets)})
+
+    report = run_rolling_backtest(
+        make_draws().iloc[:3].copy(),
+        strategies={"fixed": repeated_core_strategy},
+        min_history=2,
+    )
+    result = next(item for item in report.results if item.strategy_name == "fixed")
+
+    assert result.ticket_hit_share == pytest.approx(3 / 7)
+    assert result.unique_hit_concentration == pytest.approx(3 / 5)
+    assert result.unique_hit_concentration > result.ticket_hit_share
+
+
+def test_unique_hit_concentration_is_zero_when_pool_has_no_hits() -> None:
+    def no_hit_strategy(**kwargs: object) -> PredictionRecord:
+        prediction = fixed_strategy(**kwargs)  # type: ignore[arg-type]
+        number_sets = (
+            ((3, 4, 5, 6, 7), (2, 3)),
+            ((8, 9, 11, 12, 13), (4, 5)),
+            ((14, 15, 16, 17, 18), (6, 7)),
+            ((19, 21, 22, 23, 24), (8, 9)),
+            ((25, 26, 27, 28, 29), (10, 11)),
+        )
+        tickets = tuple(
+            ticket.model_copy(update={"front_numbers": front, "back_numbers": back})
+            for ticket, (front, back) in zip(prediction.tickets, number_sets, strict=True)
+        )
+        return prediction.model_copy(update={"tickets": tickets})
+
+    report = run_rolling_backtest(
+        make_draws().iloc[:3].copy(),
+        strategies={"fixed": no_hit_strategy},
+        min_history=2,
+    )
+    result = next(item for item in report.results if item.strategy_name == "fixed")
+
+    assert result.front_pool_coverage == 0
+    assert result.back_pool_coverage == 0
+    assert result.unique_hit_concentration == 0
+    assert result.ticket_hit_share == 0
 
 
 def test_adding_future_draw_does_not_change_earlier_backtest_result() -> None:

@@ -8,7 +8,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from dlt_number_analysis.data import DrawRecord
+from dlt_number_analysis.data.data_validator import DrawRecord
 from dlt_number_analysis.models import (
     PredictionEvaluation,
     PredictionRecord,
