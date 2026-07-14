@@ -36,6 +36,7 @@ def test_issue_26078_artifacts_are_valid_and_auditable() -> None:
     assert prediction.model_version == "manual-v0"
     assert prediction.data_cutoff_issue == "26077"
     assert prediction.generated_at is None
+    assert prediction.parameters["prize_context"] == "pool_at_or_above_800m"
     assert prediction.risk_disclaimer == DISCLAIMER
 
 
@@ -46,4 +47,7 @@ def test_issue_26078_review_contains_required_conclusions() -> None:
     assert "5 注号码池覆盖全部 5 个前区和 2 个后区" in report
     assert "号码池全覆盖不代表单注预测成功" in report
     assert "不是当前代码生成结果" in report
+    assert "七等奖 | 7 元" in report
+    assert "总奖金：7 元" in report
+    assert "ROI：-30.00%" in report
     assert DISCLAIMER in report

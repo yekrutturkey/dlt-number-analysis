@@ -67,18 +67,28 @@ def test_ticket_two_is_seventh_prize_from_configuration() -> None:
     prediction = make_manual_prediction()
     prize_table = load_prize_table(PRIZE_TABLE_PATH)
 
-    evaluation = evaluate_ticket(prediction.tickets[1], make_actual_draw(), prize_table)
+    evaluation = evaluate_ticket(
+        prediction.tickets[1],
+        make_actual_draw(),
+        prize_table,
+        prize_context="pool_at_or_above_800m",
+    )
 
     assert evaluation.front_hits == 2
     assert evaluation.back_hits == 1
     assert evaluation.prize_tier == "七等奖"
-    assert evaluation.prize_amount == Decimal("5")
+    assert evaluation.prize_amount == Decimal("7")
 
 
 def test_manual_prediction_review_has_full_pool_but_only_ticket_level_prize() -> None:
     prediction = make_manual_prediction()
     draw = make_actual_draw()
-    review = evaluate_prediction(prediction, draw, load_prize_table(PRIZE_TABLE_PATH))
+    review = evaluate_prediction(
+        prediction,
+        draw,
+        load_prize_table(PRIZE_TABLE_PATH),
+        prize_context="pool_at_or_above_800m",
+    )
 
     assert review.best_front_hits == 2
     assert review.best_back_hits == 1
@@ -86,8 +96,8 @@ def test_manual_prediction_review_has_full_pool_but_only_ticket_level_prize() ->
     assert review.front_pool_coverage == 5
     assert review.back_pool_coverage == 2
     assert review.total_cost == Decimal("10")
-    assert review.total_prize == Decimal("5")
-    assert review.roi == Decimal("-0.5")
+    assert review.total_prize == Decimal("7")
+    assert review.roi == Decimal("-0.3")
 
     report = render_prediction_review(prediction, draw, review)
     assert "不是当前代码生成结果" in report
@@ -117,3 +127,16 @@ def test_prize_amount_is_read_from_configuration_not_evaluator() -> None:
     evaluation = evaluate_ticket(prediction.tickets[1], make_actual_draw(), changed_table)
 
     assert evaluation.prize_amount == Decimal("99")
+
+
+def test_seventh_prize_remains_five_when_pool_is_below_800m() -> None:
+    prediction = make_manual_prediction()
+    evaluation = evaluate_ticket(
+        prediction.tickets[1],
+        make_actual_draw(),
+        load_prize_table(PRIZE_TABLE_PATH),
+        prize_context="pool_below_800m",
+    )
+
+    assert evaluation.prize_tier == "七等奖"
+    assert evaluation.prize_amount == Decimal("5")

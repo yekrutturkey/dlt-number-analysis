@@ -150,7 +150,8 @@ featured = engineer_features(draws)
 - 复盘报告：[`outputs/reports/26078_review.md`](outputs/reports/26078_review.md)。
 - `prediction_origin=manual_chat`、`model_version=manual-v0`、`data_cutoff_issue=26077`。
 - 这五注是用户提供的开奖前实际购买号码，不是当前代码生成结果。
-- 第 2 注命中 2 个前区和 1 个后区；按适用配置为七等奖 5 元。
+- 第 2 注命中 2 个前区和 1 个后区；开奖前奖池为 8.18 亿元，按
+  `pool_at_or_above_800m` 配置为七等奖 7 元。
 - 五注号码池覆盖全部 5 个前区和 2 个后区，但号码池全覆盖不代表单注预测成功。
 
 可重复生成复盘：

@@ -54,7 +54,7 @@ def generate_review() -> Path:
         prediction,
         actual_draw,
         prize_table,
-        prize_context="pool_below_800m",
+        prize_context="pool_at_or_above_800m",
     )
     report = render_prediction_review(prediction, actual_draw, review)
     report += (
@@ -62,7 +62,8 @@ def generate_review() -> Path:
         "- 开奖号码与事前购买号码：用户在当前聊天中提供，来源标记为 `manual_chat`。\n"
         "- 原始生成时间未提供，日志中保留为 `null`，没有推测或补造。\n"
         "- 奖级规则：https://m.lottery.gov.cn/ksjz/m/yxgz_dlt/\n"
-        "- 26077 期奖池滚存依据：https://www.gdlottery.cn/f_html/kjgg/P085_26077.html\n"
+        "- 开奖前奖池为 8.18 亿元，奖金上下文由用户确认为 "
+        "`pool_at_or_above_800m`。\n"
         "- 数据抓取模块尚未实现，当前记录仍需未来通过独立抓取源交叉核验。\n"
     )
     return write_review_report(

@@ -47,8 +47,9 @@
     "manual_entry_source": "user_chat",
     "purchase_timing": "pre_draw_as_stated_by_user",
     "original_generated_at_status": "not_provided",
-    "prize_context": "pool_below_800m",
-    "prize_context_evidence_url": "https://www.gdlottery.cn/f_html/kjgg/P085_26077.html"
+    "prize_context": "pool_at_or_above_800m",
+    "prize_pool_before_draw_cny": "818000000",
+    "prize_context_source": "user_confirmed"
   },
   "prediction_origin": "manual_chat",
   "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。"
