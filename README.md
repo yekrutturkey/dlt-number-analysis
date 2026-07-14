@@ -6,23 +6,42 @@
 
 本项目只用于数据工程、统计分析与回测研究，不承诺、暗示或声称能够预测中奖号码。
 
-## 当前范围
+## v0.4.1 当前范围
 
 已实现：
 
 - 历史开奖 CSV 的加载、结构校验、业务规则校验和校验后保存。
-- 前区和值、跨度、奇偶比、大小比、三区比、连号对数、同尾对数和与上期重号数。
-- 数据校验与特征工程的单元测试。
+- 前后区静态数值特征、展示比例字符串及与上期重号数。
+- 开奖来源、五注票据、预测日志、单注评估和复盘汇总 Pydantic 模型。
+- 自第 26014 期生效的七级奖级 JSON 配置，以及完全配置驱动的评估函数。
+- `max_coverage`、`core_rotation`、`hybrid_portfolio` 三种简单可替换策略。
+- 每种策略固定五注、禁止完全重复，并保存模型版本、截止期号、生成时间、随机种子和全部参数。
+- 严格扩展窗口滚动回测骨架及完全均匀随机五注 baseline。
+- 第 26078 期用户提供的真实开奖、手工事前五注日志和复盘报告。
+- `NumberScorer` 可替换接口，以及均匀、累计频率、近期加权频率和冷热混合评分。
+- 只使用预测时点之前经验分布的动态票据结构评分。
+- 带种子的至少 10000 注合法候选票池、逐注评分明细和 JSONL 持久化。
+- 十元五注 Portfolio 约束优化、3 注核心/稳健票与 2 注探索票。
+- 每个历史时点至少 1000 个随机种子的 baseline 分布、策略百分位和 Bootstrap 95% 置信区间。
+- 按历史规则生效边界解析奖级；规则或实际奖金缺失时保留命中指标并禁用 ROI。
+- `ScorerSpec` 绑定评分器名称、完整参数和实现版本，日志配置即实际调用配置。
+- 不自动修正冲突的 `append_draws`、`reconcile_sources` 和数据质量阻断接口。
+- 实时生成与滚动回测共用的 `PredictionPipeline`，以及四个 `dlt` CLI 子命令。
+- Python 3.12/3.13 GitHub Actions 质量检查。
+- `generate-next` 与 `evaluate-latest` 共用的 Artifact/PredictionRecord 解析闭环。
+- 历史 CSV SHA-256、Git 工作区状态、差异哈希和 Pipeline 参数交叉校验。
+- 默认至少 100 期历史，并为测试/研究短历史覆盖保存显式审计标记。
+- `fast`、`standard`、`final` 三种可展开并允许显式覆盖的运行 profile。
 
 尚未实现：
 
-- 数据源抓取与增量更新。
-- 候选组合生成、评分和下一期 5 注候选号码。
-- 每期开奖后对上一期预测进行评估。
-- 严格的时间序列滚动回测和策略比较。
-- 图表与分析报告输出。
+- 自动数据抓取和官方来源联网交叉核验。
+- 完整历史开奖数据集、旧规则配置和按期实际奖金数据。
+- 自动调度、开奖后触发和结果发布。
+- 大样本下的策略参数校准、稳定性结论和可视化报告。
+- 复杂机器学习模型。
 
-暂不引入复杂机器学习模型。
+当前评分和优化器属于可替换的工程框架，尚未经过完整历史样本验证，不代表真实中奖概率，也不声称任何策略优于随机。
 
 ## 环境与命令
 
@@ -33,6 +52,8 @@ uv sync --dev
 uv run ruff format .
 uv run ruff check .
 uv run pytest
+uv lock --check
+git diff --check
 ```
 
 运行测试时不需要网络访问。
@@ -44,13 +65,24 @@ dlt-number-analysis/
 ├── data/
 │   ├── raw/                 # 原始历史开奖 CSV
 │   └── processed/           # 校验或特征处理后的数据
+├── config/                  # 奖级、奖金和票价配置
 ├── outputs/
-│   ├── backtests/           # 未来的滚动回测结果
-│   └── predictions/         # 未来的预测记录
+│   ├── backtests/           # 滚动回测结果
+│   ├── predictions/         # 预测日志
+│   └── reports/             # 复盘报告
+├── scripts/                 # 可重复执行的制品生成脚本
 ├── src/dlt_number_analysis/
 │   ├── data/                # CSV 结构和数据校验
-│   ├── analysis/            # 统计特征与后续分析
-│   └── fetchers/            # 独立的数据抓取层（当前仅预留边界）
+│   ├── analysis/            # 前后区统计特征
+│   ├── scoring/             # 可替换号码评分和经验结构评分
+│   ├── portfolio/           # 候选票池、评分明细和五注优化
+│   ├── models/              # 来源、票据、预测和评估模型
+│   ├── evaluation/          # 配置驱动的奖级评估与报告
+│   ├── strategies/          # 五注组合策略及随机 baseline
+│   ├── backtesting/         # 严格向前滚动回测
+│   ├── pipeline/            # 实时与回测共用的端到端 Pipeline
+│   ├── fetchers/            # 独立的数据抓取层（当前仅预留边界）
+│   └── cli.py               # dlt 命令行入口
 └── tests/
     ├── data/
     └── analysis/
@@ -84,18 +116,28 @@ write_validated_draws_csv(draws, "data/processed/history.validated.csv")
 
 ## 特征口径
 
-`engineer_features` 会先校验输入，再按 CSV 中的时间顺序计算以下前区特征：
+`engineer_features` 会先校验输入，再按 CSV 中的时间顺序计算以下特征。原有比例字符串列继续保留用于展示，新增计数列供评分和统计直接使用。
 
 | 输出列 | 定义 |
 | --- | --- |
 | `front_sum` | 5 个前区号码之和 |
 | `front_span` | 最大前区号码减最小前区号码 |
+| `front_odd_count` / `front_even_count` | 前区奇数/偶数个数 |
+| `front_large_count` / `front_small_count` | 前区大号（18–35）/小号（1–17）个数 |
+| `front_zone_1_count` | 前区一区（1–12）个数 |
+| `front_zone_2_count` | 前区二区（13–24）个数 |
+| `front_zone_3_count` | 前区三区（25–35）个数 |
 | `odd_even_ratio` | 奇数个数与偶数个数，格式为 `奇:偶` |
 | `large_small_ratio` | 大号（18–35）与小号（1–17）个数，格式为 `大:小` |
 | `zone_ratio` | 一区（1–12）、二区（13–24）、三区（25–35）个数，格式为 `一区:二区:三区` |
 | `consecutive_pair_count` | 排序后差为 1 的相邻号码对数；例如 `1,2,3` 计 2 对 |
 | `same_tail_pair_count` | 个位数相同的号码对数；例如 `1,11,21` 计 3 对 |
 | `repeat_from_previous_count` | 与上一期前区号码的交集大小；第一期为缺失值 |
+| `back_sum` | 2 个后区号码之和 |
+| `back_odd_count` / `back_even_count` | 后区奇数/偶数个数 |
+| `back_large_count` / `back_small_count` | 后区大号（7–12）/小号（1–6）个数 |
+| `back_consecutive_pair_count` | 两个后区号码是否构成连号，取值 0 或 1 |
+| `back_repeat_from_previous_count` | 与上一期后区号码的交集大小；第一期为缺失值 |
 
 ```python
 from dlt_number_analysis.analysis import engineer_features
@@ -103,17 +145,145 @@ from dlt_number_analysis.analysis import engineer_features
 featured = engineer_features(draws)
 ```
 
-第一期的重号数使用 `pandas.NA`，因为“没有上期”与“有上期但重号数为 0”不是同一含义。只允许使用当前期及之前的数据计算某一期特征，不得使用未来开奖数据生成历史预测。
+前后区第一期的重号数均使用 `pandas.NA`，因为“没有上期”与“有上期但重号数为 0”不是同一含义。只允许使用当前期及之前的数据计算某一期特征，不得使用未来开奖数据生成历史预测。
 
-## 后续预测与回测约束
+## 预测日志与评估
 
-未来每次预测记录必须包含：
+`PredictionRecord` 包含固定五注 `TicketRecord`，并强制记录：
 
 - 模型/策略版本；
 - 数据截止期号；
 - 带时区的生成时间；
+- 记录来源 `prediction_origin`；
+- 随机种子；
 - 完整生成参数；
-- 候选号码及其评分；
 - 固定声明：**评分不等于真实中奖概率，彩票开奖结果是随机事件。**
 
-历史预测只能使用当期预测时点已经可获得的数据。回测必须按时间向前滚动，在每个切分点重新拟合或统计，禁止随机拆分历史数据和任何形式的未来数据泄漏。
+手工历史记录如果缺少原始生成时间，字段保留为 `null`，同时记录补录时间和缺失原因，不得猜测时间。代码生成的预测则必须提供带时区的 `generated_at` 和 `random_seed`。
+
+奖级匹配与金额位于 [`config/prize_tiers.json`](config/prize_tiers.json)。当前配置适用于自第 26014 期开始的七级规则；一、二等奖为浮动奖，缺少具体期次奖金时保留为 `null`，回测不会用假金额计算 ROI。官方规则来源：[超级大乐透游戏规则](https://m.lottery.gov.cn/ksjz/m/yxgz_dlt/)。
+
+## 第 26078 期手工预测复盘
+
+- 开奖：前区 `02,13,20,25,32`，后区 `08,11`。
+- 五注日志：[`outputs/predictions/26078_manual_chat.json`](outputs/predictions/26078_manual_chat.json)。
+- 复盘报告：[`outputs/reports/26078_review.md`](outputs/reports/26078_review.md)。
+- `prediction_origin=manual_chat`、`model_version=manual-v0`、`data_cutoff_issue=26077`。
+- 这五注是用户提供的开奖前实际购买号码，不是当前代码生成结果。
+- 第 2 注命中 2 个前区和 1 个后区；开奖前奖池为 8.18 亿元，按
+  `pool_at_or_above_800m` 配置为七等奖 7 元。
+- 总成本 10 元，总奖金 7 元，ROI 为 -30%。
+- 五注号码池覆盖全部 5 个前区和 2 个后区，但号码池全覆盖不代表单注预测成功。
+
+可重复生成复盘：
+
+```powershell
+uv run python scripts/generate_26078_review.py
+```
+
+## 可替换号码评分
+
+`NumberScorer` 的统一输入是已经校验且截止于目标期之前的历史 `DataFrame`，分别对前区或后区完整号码空间返回工程评分：
+
+- `uniform_score`：所有号码等分，用于无偏评分基准。
+- `cumulative_frequency_score`：使用传入历史窗口的累计频率。
+- `recency_weighted_frequency_score`：支持最近 10、30、100 期和可配置衰减系数。
+- `hot_cold_blend_score`：混合近期加权热度与长窗口低频度。
+
+评分器不会自行获取未来开奖。调用方必须只传入目标期之前的数据；滚动回测已在每个历史时点执行这个切片。
+
+## 动态结构评分与候选票池
+
+`fit_structure_profile` 从预测时点之前的历史特征拟合经验分布，不使用固定“合理区间”。连续概念 `front_sum`、`front_span`、`back_sum` 使用经验分位数中心性；离散概念使用带 Laplace 平滑的经验频率。奇偶只计算奇数个数，大小只计算大号个数，三区以完整 `zone_signature` 作为一个概念，避免把互补变量重复计权。13 个概念都有显式权重，权重和严格为 1；每项输出保存方法、参数、权重、原始分和加权分。
+
+`generate_candidate_pool` 默认使用一个随机种子生成 10000 注互不相同的合法候选，为每注保存：
+
+- `number_score`
+- `structure_score`
+- `combined_ticket_score`
+- 全部静态结构特征和逐项结构分数
+- 不可与实际调用分离的 `ScorerSpec`、原始号码分、历史截止期号、生成时间和随机种子
+
+`write_candidate_score_details` / `load_candidate_score_details` 使用 JSONL 保存和读取完整评分明细。候选评分仅用于组合排序，评分不等于真实中奖概率。
+
+## 五注 Portfolio 与原有组合策略
+
+`optimize_portfolio` 在 10 元、5 注预算下执行带种子的可重复搜索。默认前区号码池范围为 16–21，目标池大小为 18；池大小得分按偏离目标的距离计算，不再简单奖励号码池越大越好。任意两注前区交集不超过 2，后区组合不重复，至少覆盖 3 个历史动态和值区间和 3 种三区结构，并输出 3 注核心/稳健票和 2 注探索票。
+
+所有出现至少 2 次的前区号码都必须分类：2–3 个核心号码出现 2–3 次，2–4 个支撑号码最多出现 2 次，其余探索号码只出现 1 次，任意号码最多出现 3 次。`core_concentration` 同时评估核心覆盖、次数合规、三张稳健票覆盖和核心出现位置，不会仅因合法的核心轮转重复而扣分。目标函数保存以下明细：
+
+- 单票分数
+- 组合多样性
+- 核心集中度
+- 结构覆盖
+- 过度重复惩罚
+
+原有轻量策略继续保留：
+
+- `max_coverage`：五注前区覆盖 25 个不同号码，后区覆盖 10 个不同号码，尽量减少跨票重复。
+- `core_rotation`：五个核心前区号码各出现 2 或 3 次，其他位置优先低重复填充。
+- `hybrid_portfolio`：3 注核心轮转与 2 注探索组合。
+- `random_baseline`：完全均匀随机五注，不使用号码分数。
+
+所有策略固定生成五注并由 `PredictionRecord` 禁止任意两注完全相同。
+
+## 严格滚动回测
+
+`run_rolling_backtest` 使用扩展窗口：预测索引为 `N` 的期开奖时，只把 `draws.iloc[:N]` 交给号码评分器和策略，第 N 期实际开奖只在预测生成后用于评估。禁止随机切分历史时间序列。
+
+逐期输出：
+
+- `best_front_hits`
+- `best_back_hits`
+- `best_total_hits`
+- `ticket_hit_share`
+- `unique_hit_concentration`
+- `any_prize`
+- `front_pool_coverage`
+- `back_pool_coverage`
+- `total_cost`
+- `total_prize`
+- `roi`，定义为 `(total_prize - total_cost) / total_cost`
+
+跨期策略汇总新增：
+
+- `at_least_three_front_rate`
+- `at_least_2_plus_1_rate`
+- `ticket_hit_share`
+- `unique_hit_concentration`
+- `average_prize`
+- `median_prize`
+- `longest_no_prize_streak`
+
+完全随机五注对 8 项命中/覆盖指标生成至少 1000 个种子的分布；彩票号码标签对称，因此相同种子配置的分布在进程内缓存，不按期重复模拟。随机分布均值输出明确标为 Monte Carlo 误差的 95% 区间；策略跨历史期次的性能另用 Bootstrap 95% 区间，两者不可混用。百分位和区间只描述模拟或历史样本，不代表未来中奖概率。
+
+### v0.3 指标迁移
+
+`hit_concentration_ratio` 自 v0.4 更名为 `ticket_hit_share`，含义仍是“最佳单票命中数 / 所有票逐票命中数之和”。模型读取时兼容旧字段名，但新 JSON 只写出 `ticket_hit_share`。新增 `unique_hit_concentration = best_total_hits / (front_pool_coverage + back_pool_coverage)`；号码池无命中时为 0。后者按唯一命中号码计分，不会因为同一核心号码在多注中重复命中而人为降低集中度。
+
+## 端到端 Pipeline 与 CLI
+
+`PredictionPipeline` 的固定流程为：历史数据 → 号码评分 → 历史结构画像 → 至少 10000 注候选池 → 五注 Portfolio 优化 → `PredictionRecord`。`optimized_portfolio_strategy` 在滚动回测中接收目标期之前的完整扩展窗口；`generate-next` 使用同一个 Pipeline。
+
+```powershell
+uv run dlt validate-data
+uv run dlt run-backtest
+uv run dlt generate-next --target-issue 26079
+uv run dlt evaluate-latest
+```
+
+`generate-next` 要求显式提供目标期号，不会把截止期号静默加一，也不会猜测跨年期号。正式生成默认拒绝 Git 脏工作区；测试或研究可显式传入 `--allow-dirty`，但制品仍会保存 `git_dirty=true` 和 `git_diff_hash`。历史少于默认 100 期时会拒绝运行；`--allow-short-history` 只用于测试和研究，并保存 `short_history_override=true`。
+
+`NextPredictionArtifact` 保存目标期号、数据截止期号、带时区生成时间、Git commit SHA、Git 脏状态及差异哈希、历史文件 SHA-256、历史记录数与起止期号、展开后的完整 Pipeline 配置、全部随机种子、候选池摘要、最终 5 注和固定风险声明。外层目标期号、截止期号、生成时间、Pipeline 配置和随机种子必须与内部 `PredictionRecord` 完全一致，否则拒绝加载。`evaluate-latest` 同时接受纯 `PredictionRecord` JSON 和 `NextPredictionArtifact` JSON。
+
+Pipeline 提供 `fast`、`standard`、`final` 三种运行 profile，实际候选数、搜索次数、稳定候选上限和候选评分并行数都会展开并保存在日志中；CLI 可用 `--candidate-count`、`--search-trials` 和 `--parallel-workers` 显式覆盖。CLI 已支持 `hot_cold_blend_score` 的 `--hot-window`、`--cold-window`、`--hot-weight` 和 `--decay`，这些参数由同一个 `ScorerSpec` 同时驱动执行和审计日志。默认回测只运行轻量随机 baseline；传入 `--include-optimized` 才逐历史期运行优化 Pipeline。
+
+`reconcile_sources` 只报告冲突，不选择“更可信”的值；存在任何冲突时不返回可用于回测的合并表。数据质量 finding 中只有 `severity=error` 会令 `is_valid=false` 和 `blocks_backtest=true`；warning 会保留在报告中但不阻断回测。错误报告会使滚动回测立即停止，必须人工核实并重新提供一致数据。
+
+## 历史规则与 ROI 边界
+
+`PrizeRuleSchedule` 按 `effective_from_issue` 为每一期选择当时最近生效的规则。只有 2026 年七级规则配置时，早于第 26014 期的开奖不会套用该规则；命中指标仍会保留，但 `total_prize` 和 `roi` 为 `null`。
+
+对于存在多个奖池上下文的规则，历史回测必须提供该期 `prize_context_by_issue` 或 `IssuePrizeRecord`；命中奖项但缺少上下文或浮动奖实际金额时，金额指标标为不可用。`IssuePrizeRecord` 绑定期号和规则版本，并允许用当期实际单注奖金覆盖规则配置。这样可以跨规则时期比较号码命中，但不会用 2026 年规则或猜测奖金计算旧期 ROI。
+
+报告始终包含完全随机五注 baseline 和固定风险声明。当前框架不声称任何策略优于随机；在缺少完整历史数据、旧规则配置、逐期实际奖金和足够样本前，不应做策略优越性结论。

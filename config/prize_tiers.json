@@ -1,0 +1,84 @@
+{
+  "game": "dlt",
+  "version": "dlt-seven-tier-2026-26014",
+  "effective_from_issue": "26014",
+  "source_url": "https://m.lottery.gov.cn/ksjz/m/yxgz_dlt/",
+  "ticket_cost": "2.00",
+  "contexts": [
+    "pool_below_800m",
+    "pool_at_or_above_800m"
+  ],
+  "default_context": "pool_below_800m",
+  "tiers": [
+    {
+      "prize_tier": "一等奖",
+      "matches": [{"front_hits": 5, "back_hits": 2}],
+      "prize_amount_by_context": {
+        "pool_below_800m": null,
+        "pool_at_or_above_800m": null
+      }
+    },
+    {
+      "prize_tier": "二等奖",
+      "matches": [{"front_hits": 5, "back_hits": 1}],
+      "prize_amount_by_context": {
+        "pool_below_800m": null,
+        "pool_at_or_above_800m": null
+      }
+    },
+    {
+      "prize_tier": "三等奖",
+      "matches": [
+        {"front_hits": 5, "back_hits": 0},
+        {"front_hits": 4, "back_hits": 2}
+      ],
+      "prize_amount_by_context": {
+        "pool_below_800m": "5000",
+        "pool_at_or_above_800m": "6666"
+      }
+    },
+    {
+      "prize_tier": "四等奖",
+      "matches": [{"front_hits": 4, "back_hits": 1}],
+      "prize_amount_by_context": {
+        "pool_below_800m": "300",
+        "pool_at_or_above_800m": "380"
+      }
+    },
+    {
+      "prize_tier": "五等奖",
+      "matches": [
+        {"front_hits": 4, "back_hits": 0},
+        {"front_hits": 3, "back_hits": 2}
+      ],
+      "prize_amount_by_context": {
+        "pool_below_800m": "150",
+        "pool_at_or_above_800m": "200"
+      }
+    },
+    {
+      "prize_tier": "六等奖",
+      "matches": [
+        {"front_hits": 3, "back_hits": 1},
+        {"front_hits": 2, "back_hits": 2}
+      ],
+      "prize_amount_by_context": {
+        "pool_below_800m": "15",
+        "pool_at_or_above_800m": "18"
+      }
+    },
+    {
+      "prize_tier": "七等奖",
+      "matches": [
+        {"front_hits": 3, "back_hits": 0},
+        {"front_hits": 2, "back_hits": 1},
+        {"front_hits": 1, "back_hits": 2},
+        {"front_hits": 0, "back_hits": 2}
+      ],
+      "prize_amount_by_context": {
+        "pool_below_800m": "5",
+        "pool_at_or_above_800m": "7"
+      }
+    }
+  ]
+}

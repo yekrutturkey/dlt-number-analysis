@@ -37,20 +37,13 @@ def test_validate_draw_dataframe_normalizes_without_mutating_input() -> None:
     assert original.loc[0, "draw_date"] == "2007-05-28"
 
 
-def test_csv_round_trip_preserves_issue_leading_zero() -> None:
-    target = Path(__file__).with_name("_validator_round_trip_test.csv")
-    if target.exists():
-        pytest.fail(f"测试输出路径已存在，拒绝覆盖：{target}")
+def test_csv_round_trip_preserves_issue_leading_zero(tmp_path: Path) -> None:
+    target = tmp_path / "nested" / "draws.csv"
+    written = write_validated_draws_csv(make_valid_draws(), target)
+    loaded = load_draws_csv(written)
 
-    try:
-        written = write_validated_draws_csv(make_valid_draws(), target)
-        loaded = load_draws_csv(written)
-
-        assert written == target
-        assert loaded["issue"].tolist() == ["07001", "07002", "07003"]
-    finally:
-        if target.is_file():
-            target.unlink()
+    assert written == target
+    assert loaded["issue"].tolist() == ["07001", "07002", "07003"]
 
 
 @pytest.mark.parametrize(
