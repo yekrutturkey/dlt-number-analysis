@@ -358,6 +358,7 @@ def run_rolling_backtest(
     bootstrap_resamples: int = 1000,
     default_ticket_cost: Decimal = Decimal("2"),
     data_quality_report: DataQualityReport | None = None,
+    allow_short_history: bool = False,
 ) -> BacktestReport:
     """Run strict expanding-window predictions; never expose the target draw to a strategy."""
     if min_history < 1:
@@ -451,6 +452,7 @@ def run_rolling_backtest(
                 generated_at=generated_at,
                 random_seed=random_seed,
                 pipeline_config=config,
+                allow_short_history=allow_short_history,
             )
             predictions.append((strategy_name, random_seed, prediction))
 

@@ -8,10 +8,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dlt_number_analysis.data.data_validator import (
     CSV_COLUMNS,
@@ -59,6 +59,16 @@ class DataQualityReport(BaseModel):
     is_valid: bool
     blocks_backtest: bool
 
+    @model_validator(mode="after")
+    def validate_severity_semantics(self) -> Self:
+        """Warnings remain visible but only errors may invalidate or block data."""
+        has_errors = any(finding.severity == "error" for finding in self.findings)
+        if self.is_valid == has_errors:
+            raise ValueError("is_valid must be false exactly when error findings exist")
+        if self.blocks_backtest != has_errors:
+            raise ValueError("blocks_backtest must be true exactly when errors exist")
+        return self
+
 
 @dataclass(frozen=True, slots=True)
 class SourceReconciliationResult:
@@ -70,6 +80,10 @@ class SourceReconciliationResult:
 
 def _value_text(value: object) -> str:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _has_errors(findings: Sequence[DataQualityIssue]) -> bool:
+    return any(finding.severity == "error" for finding in findings)
 
 
 def reconcile_sources(sources: Mapping[str, pd.DataFrame]) -> SourceReconciliationResult:
@@ -119,7 +133,7 @@ def reconcile_sources(sources: Mapping[str, pd.DataFrame]) -> SourceReconciliati
     findings.extend(conflicts)
 
     reconciled: pd.DataFrame | None = None
-    if not findings:
+    if not _has_errors(findings):
         unique_records = [
             next(iter(by_source.values()))
             for _, by_source in sorted(issue_records.items(), key=lambda item: int(item[0]))
@@ -136,6 +150,7 @@ def reconcile_sources(sources: Mapping[str, pd.DataFrame]) -> SourceReconciliati
                 )
             )
     issues = sorted(issue_records, key=int)
+    has_errors = _has_errors(findings)
     report = DataQualityReport(
         record_count=len(issues),
         data_start_issue=issues[0] if issues else None,
@@ -143,8 +158,8 @@ def reconcile_sources(sources: Mapping[str, pd.DataFrame]) -> SourceReconciliati
         source_names=tuple(sorted(sources)),
         findings=tuple(findings),
         conflict_count=len(conflicts),
-        is_valid=not findings,
-        blocks_backtest=bool(findings),
+        is_valid=not has_errors,
+        blocks_backtest=has_errors,
     )
     return SourceReconciliationResult(reconciled_draws=reconciled, report=report)
 
@@ -186,6 +201,7 @@ def generate_data_quality_report(
             is_valid=False,
             blocks_backtest=True,
         )
+    has_errors = _has_errors(findings)
     return DataQualityReport(
         record_count=len(validated),
         data_start_issue=str(validated.iloc[0]["issue"]),
@@ -193,8 +209,8 @@ def generate_data_quality_report(
         source_names=source_names,
         findings=tuple(findings),
         conflict_count=sum(item.code == "source_conflict" for item in findings),
-        is_valid=not findings,
-        blocks_backtest=bool(findings),
+        is_valid=not has_errors,
+        blocks_backtest=has_errors,
     )
 
 

@@ -7,12 +7,17 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from pydantic import ValidationError
 
 from dlt_number_analysis.backtesting import run_rolling_backtest
 from dlt_number_analysis.data import (
     CSV_COLUMNS,
+    DataQualityIssue,
+    DataQualityReport,
     DrawConflictError,
+    SourceReconciliationResult,
     append_draws,
+    assert_backtest_ready,
     generate_data_quality_report,
     load_issue_prizes,
     load_prize_rule_schedule,
@@ -75,6 +80,90 @@ def test_conflict_report_blocks_backtest() -> None:
 
     with pytest.raises(ValueError, match="blocks backtesting"):
         run_rolling_backtest(make_existing(), min_history=1, data_quality_report=quality)
+
+
+def test_warning_is_reported_without_invalidating_or_blocking_history() -> None:
+    warning = DataQualityIssue(
+        severity="warning",
+        code="single_source_only",
+        message="history currently has only one verified source",
+        sources=("official_a",),
+    )
+    reconciliation = SourceReconciliationResult(
+        reconciled_draws=make_existing(),
+        report=DataQualityReport(
+            record_count=2,
+            data_start_issue="26001",
+            data_cutoff_issue="26002",
+            source_names=("official_a",),
+            findings=(warning,),
+            conflict_count=0,
+            is_valid=True,
+            blocks_backtest=False,
+        ),
+    )
+
+    quality = generate_data_quality_report(make_existing(), reconciliation=reconciliation)
+
+    assert quality.findings == (warning,)
+    assert quality.is_valid is True
+    assert quality.blocks_backtest is False
+    assert_backtest_ready(quality)
+
+
+def test_mixed_warning_and_error_is_invalid_and_blocks_backtest() -> None:
+    warning = DataQualityIssue(
+        severity="warning",
+        code="single_source_only",
+        message="history currently has only one verified source",
+    )
+    error = DataQualityIssue(
+        severity="error",
+        code="source_conflict",
+        message="sources disagree",
+        issue="26002",
+    )
+    reconciliation = SourceReconciliationResult(
+        reconciled_draws=None,
+        report=DataQualityReport(
+            record_count=2,
+            data_start_issue="26001",
+            data_cutoff_issue="26002",
+            source_names=("official_a", "official_b"),
+            findings=(warning, error),
+            conflict_count=1,
+            is_valid=False,
+            blocks_backtest=True,
+        ),
+    )
+
+    quality = generate_data_quality_report(make_existing(), reconciliation=reconciliation)
+
+    assert {finding.severity for finding in quality.findings} == {"warning", "error"}
+    assert quality.is_valid is False
+    assert quality.blocks_backtest is True
+    with pytest.raises(ValueError, match="blocks backtesting"):
+        assert_backtest_ready(quality)
+
+
+def test_quality_report_rejects_warning_only_blocking_flags() -> None:
+    with pytest.raises(ValidationError, match="is_valid"):
+        DataQualityReport(
+            record_count=1,
+            data_start_issue="26001",
+            data_cutoff_issue="26001",
+            source_names=("official_a",),
+            findings=(
+                DataQualityIssue(
+                    severity="warning",
+                    code="single_source_only",
+                    message="warning only",
+                ),
+            ),
+            conflict_count=0,
+            is_valid=False,
+            blocks_backtest=True,
+        )
 
 
 def test_load_issue_prizes_and_rule_schedule(tmp_path: Path) -> None:

@@ -42,6 +42,7 @@ def pipeline_config() -> PipelineConfig:
     return PipelineConfig(
         scorer_spec=ScorerSpec(name="uniform_score"),
         optimizer_search_trials=5_000,
+        minimum_history_size=40,
     )
 
 
@@ -64,6 +65,9 @@ def test_prediction_pipeline_persists_complete_bound_configuration(
         mode="json"
     )
     assert result.prediction.parameters["random_seeds"] == seeds.model_dump(mode="json")
+    assert result.prediction.parameters["short_history_override"] is False
+    assert result.config.profile == "standard"
+    assert result.config.parallel_workers == 1
     assert result.candidate_pool_summary.candidate_count == 10_000
     assert result.candidate_pool_summary.scorer_spec == pipeline_config.scorer_spec
     assert len(result.prediction.tickets) == 5
@@ -80,6 +84,39 @@ def test_pipeline_rejects_history_that_contains_target_or_future_draw(
             generated_at=datetime(2026, 7, 14, tzinfo=UTC),
             random_seeds=PipelineSeeds.from_base_seed(1),
         )
+
+
+def test_pipeline_rejects_history_below_default_minimum_without_override() -> None:
+    with pytest.raises(ValueError, match="shorter than minimum_history_size"):
+        PredictionPipeline().run(
+            make_history(40),
+            target_issue="25041",
+            generated_at=datetime(2026, 7, 14, tzinfo=UTC),
+            random_seeds=PipelineSeeds.from_base_seed(1),
+        )
+
+
+def test_pipeline_profiles_expand_all_runtime_parameters() -> None:
+    fast = PipelineConfig(profile="fast")
+    standard = PipelineConfig(profile="standard")
+    final = PipelineConfig(profile="final")
+
+    assert (fast.candidate_count, fast.optimizer_search_trials, fast.parallel_workers) == (
+        10_000,
+        5_000,
+        1,
+    )
+    assert (
+        standard.candidate_count,
+        standard.optimizer_search_trials,
+        standard.parallel_workers,
+    ) == (10_000, 25_000, 1)
+    assert (final.candidate_count, final.optimizer_search_trials, final.parallel_workers) == (
+        25_000,
+        100_000,
+        4,
+    )
+    assert PipelineConfig(profile="final", candidate_count=30_000).candidate_count == 30_000
 
 
 def test_pipeline_config_rejects_structure_weights_that_do_not_sum_to_one() -> None:

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from math import isclose, isfinite
 from statistics import fmean
+from typing import Any, Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -26,6 +28,28 @@ from dlt_number_analysis.scoring import (
     fit_structure_profile,
 )
 
+PipelineProfile = Literal["fast", "standard", "final"]
+PROFILE_DEFAULTS: dict[PipelineProfile, dict[str, int]] = {
+    "fast": {
+        "candidate_count": 10_000,
+        "optimizer_search_trials": 5_000,
+        "stable_candidate_limit": 2_000,
+        "parallel_workers": 1,
+    },
+    "standard": {
+        "candidate_count": 10_000,
+        "optimizer_search_trials": 25_000,
+        "stable_candidate_limit": 2_000,
+        "parallel_workers": 1,
+    },
+    "final": {
+        "candidate_count": 25_000,
+        "optimizer_search_trials": 100_000,
+        "stable_candidate_limit": 5_000,
+        "parallel_workers": 4,
+    },
+}
+
 
 class PipelineSeeds(BaseModel):
     """Every random seed consumed by one pipeline execution."""
@@ -45,6 +69,7 @@ class PipelineConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    profile: PipelineProfile = "standard"
     scorer_spec: ScorerSpec = Field(
         default_factory=lambda: ScorerSpec(
             name="recency_weighted_frequency_score",
@@ -55,20 +80,38 @@ class PipelineConfig(BaseModel):
         default_factory=lambda: dict(DEFAULT_STRUCTURE_WEIGHTS)
     )
     laplace_alpha: float = Field(default=1.0, gt=0)
-    candidate_count: int = Field(default=10_000, ge=10_000)
+    candidate_count: int = Field(ge=10_000)
     front_number_weight: float = Field(default=5 / 7, ge=0)
     back_number_weight: float = Field(default=2 / 7, ge=0)
     number_score_weight: float = Field(default=0.5, ge=0)
     structure_score_weight: float = Field(default=0.5, ge=0)
     portfolio_constraints: PortfolioConstraints = Field(default_factory=PortfolioConstraints)
-    optimizer_search_trials: int = Field(default=25_000, ge=1)
-    stable_candidate_limit: int = Field(default=2_000, ge=5)
+    optimizer_search_trials: int = Field(ge=1)
+    stable_candidate_limit: int = Field(ge=5)
+    parallel_workers: int = Field(ge=1, le=64)
+    minimum_history_size: int = Field(default=100, ge=1)
     single_ticket_weight: float = Field(default=0.45, ge=0)
     diversity_weight: float = Field(default=0.25, ge=0)
     core_weight: float = Field(default=0.15, ge=0)
     structure_weight: float = Field(default=0.15, ge=0)
     repeat_penalty_weight: float = Field(default=0.20, ge=0)
-    model_version: str = "prediction-pipeline-v0.4"
+    model_version: str = "prediction-pipeline-v0.4.1"
+
+    @model_validator(mode="before")
+    @classmethod
+    def expand_profile_defaults(cls, value: Any) -> Any:
+        """Materialize a named run profile while preserving explicit overrides."""
+        if not isinstance(value, Mapping):
+            return value
+        resolved = dict(value)
+        profile = resolved.get("profile", "standard")
+        defaults = PROFILE_DEFAULTS.get(profile)
+        if defaults is None:
+            return resolved
+        for name, default in defaults.items():
+            if resolved.get(name) is None:
+                resolved[name] = default
+        return resolved
 
     @model_validator(mode="after")
     def validate_weights_and_limits(self) -> PipelineConfig:
@@ -121,6 +164,7 @@ class PipelineResult(BaseModel):
     structure_profile: HistoricalStructureProfile
     config: PipelineConfig
     random_seeds: PipelineSeeds
+    short_history_override: bool = False
     risk_disclaimer: str = DISCLAIMER
 
     @field_validator("risk_disclaimer")
@@ -159,8 +203,15 @@ class PredictionPipeline:
         target_issue: str,
         generated_at: datetime,
         random_seeds: PipelineSeeds,
+        allow_short_history: bool = False,
     ) -> PipelineResult:
         validated = validate_draw_dataframe(history)
+        short_history_override = len(validated) < self.config.minimum_history_size
+        if short_history_override and not allow_short_history:
+            raise ValueError(
+                "pipeline history is shorter than minimum_history_size; "
+                "use an explicit research override to continue"
+            )
         cutoff_issue = str(validated.iloc[-1]["issue"])
         if int(cutoff_issue) >= int(target_issue):
             raise ValueError("pipeline history cutoff must precede target_issue")
@@ -181,6 +232,7 @@ class PredictionPipeline:
             back_number_weight=self.config.back_number_weight,
             number_score_weight=self.config.number_score_weight,
             structure_score_weight=self.config.structure_score_weight,
+            parallel_workers=self.config.parallel_workers,
         )
         selection = optimize_portfolio(
             pool,
@@ -205,6 +257,7 @@ class PredictionPipeline:
                     "pipeline_config": self.config.model_dump(mode="json"),
                     "random_seeds": random_seeds.model_dump(mode="json"),
                     "candidate_pool_summary": summary.model_dump(mode="json"),
+                    "short_history_override": short_history_override,
                 },
             }
         )
@@ -216,6 +269,7 @@ class PredictionPipeline:
             structure_profile=profile,
             config=self.config,
             random_seeds=random_seeds,
+            short_history_override=short_history_override,
         )
 
 
@@ -226,6 +280,7 @@ def optimized_portfolio_strategy(
     generated_at: datetime,
     random_seed: int,
     pipeline_config: PipelineConfig | None = None,
+    allow_short_history: bool = False,
 ) -> PredictionRecord:
     """Run the shared pipeline as a strict-history rolling-backtest strategy."""
     return (
@@ -235,6 +290,7 @@ def optimized_portfolio_strategy(
             target_issue=target_issue,
             generated_at=generated_at,
             random_seeds=PipelineSeeds.from_base_seed(random_seed),
+            allow_short_history=allow_short_history,
         )
         .prediction
     )

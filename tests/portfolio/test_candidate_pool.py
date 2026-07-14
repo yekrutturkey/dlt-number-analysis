@@ -59,6 +59,7 @@ def candidate_pool() -> CandidatePool:
             name="recency_weighted_frequency_score",
             parameters={"window": 30, "decay": 0.93},
         ),
+        parallel_workers=2,
     )
 
 
@@ -88,6 +89,7 @@ def test_candidate_pool_has_at_least_ten_thousand_unique_scored_tickets(
     assert candidate_pool.data_cutoff_issue == str(make_history().iloc[-1]["issue"])
     assert candidate_pool.scorer_parameters["window"] == 30
     assert candidate_pool.scorer_spec.name == "recency_weighted_frequency_score"
+    assert candidate_pool.generation_parameters["parallel_workers"] == 2
     assert candidate_pool.risk_disclaimer == DISCLAIMER
     first = candidate_pool.candidates[0]
     assert 0 <= first.number_score <= 1

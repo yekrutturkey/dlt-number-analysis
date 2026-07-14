@@ -6,7 +6,7 @@
 
 本项目只用于数据工程、统计分析与回测研究，不承诺、暗示或声称能够预测中奖号码。
 
-## v0.4 当前范围
+## v0.4.1 当前范围
 
 已实现：
 
@@ -28,6 +28,10 @@
 - 不自动修正冲突的 `append_draws`、`reconcile_sources` 和数据质量阻断接口。
 - 实时生成与滚动回测共用的 `PredictionPipeline`，以及四个 `dlt` CLI 子命令。
 - Python 3.12/3.13 GitHub Actions 质量检查。
+- `generate-next` 与 `evaluate-latest` 共用的 Artifact/PredictionRecord 解析闭环。
+- 历史 CSV SHA-256、Git 工作区状态、差异哈希和 Pipeline 参数交叉校验。
+- 默认至少 100 期历史，并为测试/研究短历史覆盖保存显式审计标记。
+- `fast`、`standard`、`final` 三种可展开并允许显式覆盖的运行 profile。
 
 尚未实现：
 
@@ -264,13 +268,17 @@ uv run python scripts/generate_26078_review.py
 ```powershell
 uv run dlt validate-data
 uv run dlt run-backtest
-uv run dlt generate-next
+uv run dlt generate-next --target-issue 26079
 uv run dlt evaluate-latest
 ```
 
-`generate-next` 制品保存目标期号、数据截止期号、带时区生成时间、Git commit SHA、完整 Pipeline 配置、全部随机种子、候选池摘要、最终 5 注和固定风险声明。默认回测只运行轻量随机 baseline；传入 `--include-optimized` 才逐历史期运行至少 10000 注候选的优化 Pipeline。
+`generate-next` 要求显式提供目标期号，不会把截止期号静默加一，也不会猜测跨年期号。正式生成默认拒绝 Git 脏工作区；测试或研究可显式传入 `--allow-dirty`，但制品仍会保存 `git_dirty=true` 和 `git_diff_hash`。历史少于默认 100 期时会拒绝运行；`--allow-short-history` 只用于测试和研究，并保存 `short_history_override=true`。
 
-`reconcile_sources` 只报告冲突，不选择“更可信”的值；存在任何冲突时不返回可用于回测的合并表。`generate_data_quality_report` 的 `blocks_backtest=true` 会使滚动回测立即停止，必须人工核实并重新提供一致数据。
+`NextPredictionArtifact` 保存目标期号、数据截止期号、带时区生成时间、Git commit SHA、Git 脏状态及差异哈希、历史文件 SHA-256、历史记录数与起止期号、展开后的完整 Pipeline 配置、全部随机种子、候选池摘要、最终 5 注和固定风险声明。外层目标期号、截止期号、生成时间、Pipeline 配置和随机种子必须与内部 `PredictionRecord` 完全一致，否则拒绝加载。`evaluate-latest` 同时接受纯 `PredictionRecord` JSON 和 `NextPredictionArtifact` JSON。
+
+Pipeline 提供 `fast`、`standard`、`final` 三种运行 profile，实际候选数、搜索次数、稳定候选上限和候选评分并行数都会展开并保存在日志中；CLI 可用 `--candidate-count`、`--search-trials` 和 `--parallel-workers` 显式覆盖。CLI 已支持 `hot_cold_blend_score` 的 `--hot-window`、`--cold-window`、`--hot-weight` 和 `--decay`，这些参数由同一个 `ScorerSpec` 同时驱动执行和审计日志。默认回测只运行轻量随机 baseline；传入 `--include-optimized` 才逐历史期运行优化 Pipeline。
+
+`reconcile_sources` 只报告冲突，不选择“更可信”的值；存在任何冲突时不返回可用于回测的合并表。数据质量 finding 中只有 `severity=error` 会令 `is_valid=false` 和 `blocks_backtest=true`；warning 会保留在报告中但不阻断回测。错误报告会使滚动回测立即停止，必须人工核实并重新提供一致数据。
 
 ## 历史规则与 ROI 边界
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,12 +19,15 @@ from dlt_number_analysis.data import (
     load_prize_rule_schedule,
 )
 from dlt_number_analysis.evaluation import apply_issue_prize_record, evaluate_prediction
-from dlt_number_analysis.models import load_prediction_record
+from dlt_number_analysis.models import PredictionRecord, load_prediction_record
 from dlt_number_analysis.pipeline import (
     NextPredictionArtifact,
     PipelineConfig,
     PipelineSeeds,
     PredictionPipeline,
+    build_history_audit,
+    collect_git_audit,
+    load_next_prediction_artifact,
 )
 from dlt_number_analysis.scoring import ScorerSpec
 
@@ -44,33 +46,29 @@ def _write_json(payload: Any, path: Path) -> Path:
     return path
 
 
-def _git_commit_sha() -> str:
-    completed = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return completed.stdout.strip()
-
-
-def _next_issue(cutoff_issue: str) -> str:
-    return str(int(cutoff_issue) + 1).zfill(len(cutoff_issue))
-
-
 def _pipeline_config(args: argparse.Namespace) -> PipelineConfig:
-    return PipelineConfig(
-        scorer_spec=ScorerSpec(
-            name=args.scorer,
-            parameters=(
-                {"window": args.window, "decay": args.decay}
-                if args.scorer == "recency_weighted_frequency_score"
-                else {}
-            ),
-        ),
-        optimizer_search_trials=args.search_trials,
-    )
+    scorer_parameters: dict[str, int | float] = {}
+    if args.scorer == "recency_weighted_frequency_score":
+        scorer_parameters = {"window": args.window, "decay": args.decay}
+    elif args.scorer == "hot_cold_blend_score":
+        scorer_parameters = {
+            "hot_window": args.hot_window,
+            "cold_window": args.cold_window,
+            "hot_weight": args.hot_weight,
+            "decay": args.decay,
+        }
+    values: dict[str, Any] = {
+        "profile": args.profile,
+        "scorer_spec": ScorerSpec(name=args.scorer, parameters=scorer_parameters),
+        "minimum_history_size": args.minimum_history_size,
+    }
+    optional_overrides = {
+        "candidate_count": args.candidate_count,
+        "optimizer_search_trials": args.search_trials,
+        "parallel_workers": args.parallel_workers,
+    }
+    values.update({name: value for name, value in optional_overrides.items() if value is not None})
+    return PipelineConfig(**values)
 
 
 def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
@@ -80,12 +78,21 @@ def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
             "uniform_score",
             "cumulative_frequency_score",
             "recency_weighted_frequency_score",
+            "hot_cold_blend_score",
         ),
         default="recency_weighted_frequency_score",
     )
     parser.add_argument("--window", type=int, choices=(10, 30, 100), default=30)
+    parser.add_argument("--hot-window", type=int, choices=(10, 30, 100), default=10)
+    parser.add_argument("--cold-window", type=int, choices=(10, 30, 100), default=100)
+    parser.add_argument("--hot-weight", type=float, default=0.65)
     parser.add_argument("--decay", type=float, default=0.93)
-    parser.add_argument("--search-trials", type=int, default=25_000)
+    parser.add_argument("--profile", choices=("fast", "standard", "final"), default="standard")
+    parser.add_argument("--candidate-count", type=int)
+    parser.add_argument("--search-trials", type=int)
+    parser.add_argument("--parallel-workers", type=int)
+    parser.add_argument("--minimum-history-size", type=int, default=100)
+    parser.add_argument("--allow-short-history", action="store_true")
 
 
 def _validate_data(args: argparse.Namespace) -> int:
@@ -101,18 +108,23 @@ def _run_backtest(args: argparse.Namespace) -> int:
     draws = load_draws_csv(args.draws)
     schedule = load_prize_rule_schedule(args.prize_rules)
     issue_prizes = load_issue_prizes(args.issue_prizes) if args.issue_prizes else {}
+    pipeline_config = _pipeline_config(args) if args.include_optimized else None
     pipelines = (
-        {"optimized_portfolio_strategy": _pipeline_config(args)} if args.include_optimized else None
+        {"optimized_portfolio_strategy": pipeline_config} if pipeline_config is not None else None
     )
+    minimum_history = args.min_history
+    if pipeline_config is not None and not args.allow_short_history:
+        minimum_history = max(minimum_history, pipeline_config.minimum_history_size)
     report = run_rolling_backtest(
         draws,
         prize_tables=schedule.tables,
         pipeline_configs=pipelines,
-        min_history=args.min_history,
+        min_history=minimum_history,
         base_random_seed=args.random_seed,
         random_baseline_seed_count=args.baseline_seeds,
         bootstrap_resamples=args.bootstrap_resamples,
         issue_prize_records=issue_prizes,
+        allow_short_history=args.allow_short_history,
     )
     target = _write_json(report, args.output)
     print(f"backtest report: {target}")
@@ -123,7 +135,14 @@ def _run_backtest(args: argparse.Namespace) -> int:
 def _generate_next(args: argparse.Namespace) -> int:
     draws = load_draws_csv(args.draws)
     cutoff_issue = str(draws.iloc[-1]["issue"])
-    target_issue = args.target_issue or _next_issue(cutoff_issue)
+    target_issue = str(args.target_issue)
+    git_audit = collect_git_audit(PROJECT_ROOT)
+    if git_audit.dirty and not args.allow_dirty:
+        raise ValueError(
+            "formal generate-next refuses a dirty Git working tree; "
+            "pass --allow-dirty only for an explicit test or research override"
+        )
+    history_audit = build_history_audit(args.draws, draws)
     generated_at = datetime.now(UTC)
     config = _pipeline_config(args)
     seeds = PipelineSeeds.from_base_seed(args.random_seed)
@@ -132,12 +151,20 @@ def _generate_next(args: argparse.Namespace) -> int:
         target_issue=target_issue,
         generated_at=generated_at,
         random_seeds=seeds,
+        allow_short_history=args.allow_short_history,
     )
     artifact = NextPredictionArtifact(
         target_issue=target_issue,
         data_cutoff_issue=cutoff_issue,
         generated_at=generated_at,
-        git_commit_sha=_git_commit_sha(),
+        git_commit_sha=git_audit.commit_sha,
+        git_dirty=git_audit.dirty,
+        git_diff_hash=git_audit.diff_hash,
+        history_sha256=history_audit.sha256,
+        history_record_count=history_audit.record_count,
+        history_start_issue=history_audit.start_issue,
+        history_cutoff_issue=history_audit.cutoff_issue,
+        short_history_override=result.short_history_override,
         pipeline_config=config,
         random_seeds=seeds,
         candidate_pool_summary=result.candidate_pool_summary,
@@ -150,9 +177,17 @@ def _generate_next(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_prediction_input(path: Path) -> PredictionRecord:
+    """Accept either a bare prediction log or a complete next-prediction artifact."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and "prediction" in payload:
+        return load_next_prediction_artifact(path).prediction
+    return load_prediction_record(path)
+
+
 def _evaluate_latest(args: argparse.Namespace) -> int:
     draws = load_draws_csv(args.draws)
-    prediction = load_prediction_record(args.prediction)
+    prediction = _load_prediction_input(args.prediction)
     matching = draws.loc[draws["issue"].astype(str) == prediction.target_issue]
     if matching.empty:
         raise ValueError(f"draw history does not contain target issue {prediction.target_issue}")
@@ -211,9 +246,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     generate = subparsers.add_parser("generate-next")
     generate.add_argument("--draws", type=Path, default=DEFAULT_DRAWS)
-    generate.add_argument("--target-issue")
+    generate.add_argument("--target-issue", required=True)
     generate.add_argument("--random-seed", type=int, default=20260714)
     generate.add_argument("--output", type=Path)
+    generate.add_argument("--allow-dirty", action="store_true")
     _add_pipeline_arguments(generate)
     generate.set_defaults(handler=_generate_next)
 
