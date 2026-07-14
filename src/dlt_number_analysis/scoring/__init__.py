@@ -21,6 +21,7 @@ from dlt_number_analysis.scoring.structure import (
     StructureScore,
     TicketStructureFeatures,
     compute_ticket_structure,
+    compute_ticket_structures_batch,
     fit_structure_profile,
     score_ticket_structure,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "TicketStructureFeatures",
     "build_number_scorer",
     "compute_ticket_structure",
+    "compute_ticket_structures_batch",
     "cumulative_frequency_score",
     "fit_structure_profile",
     "hot_cold_blend_score",

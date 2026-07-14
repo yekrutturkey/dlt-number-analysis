@@ -1,0 +1,8 @@
+{
+  "source_name": "500_com",
+  "source_url": "https://datachart.500.com/dlt/history/newinc/history.php?start=07001&end=26078",
+  "fetched_at": "2026-07-14T08:37:39.892273Z",
+  "source_format": "five_hundred_html",
+  "content_hash": "ba3b436d4942e3e2dd3e4968085b3903011bc0da521acb6e03b782e380f0bd1b",
+  "raw_file": "20260714T083739892273Z_ba3b436d4942e3e2dd3e4968085b3903011bc0da521acb6e03b782e380f0bd1b.html"
+}

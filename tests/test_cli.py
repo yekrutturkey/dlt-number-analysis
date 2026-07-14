@@ -46,7 +46,7 @@ def write_history(path: Path, count: int = 40) -> Path:
 
 
 def test_validate_data_and_empty_backtest_commands_write_reports(tmp_path: Path) -> None:
-    draws = PROJECT_ROOT / "data" / "raw" / "draws.csv"
+    draws = write_history(tmp_path / "draws.csv", count=10)
     quality_output = tmp_path / "quality.json"
     backtest_output = tmp_path / "backtest.json"
 
@@ -57,6 +57,9 @@ def test_validate_data_and_empty_backtest_commands_write_reports(tmp_path: Path)
                 "run-backtest",
                 "--draws",
                 str(draws),
+                "--allow-unverified-history",
+                "--min-history",
+                "10",
                 "--output",
                 str(backtest_output),
             ]
@@ -99,6 +102,7 @@ def test_generate_next_artifact_to_evaluate_latest_closed_loop(tmp_path: Path) -
             "--minimum-history-size",
             "100",
             "--allow-short-history",
+            "--allow-unverified-history",
             "--allow-dirty",
             "--output",
             str(output),
@@ -112,11 +116,14 @@ def test_generate_next_artifact_to_evaluate_latest_closed_loop(tmp_path: Path) -
     assert len(artifact["git_commit_sha"]) == 40
     assert isinstance(artifact["git_dirty"], bool)
     assert len(artifact["git_diff_hash"]) == 64
-    assert artifact["history_sha256"] == history_sha256
+    assert artifact["raw_file_sha256"] == history_sha256
+    assert len(artifact["canonical_history_sha256"]) == 64
     assert artifact["history_record_count"] == 40
     assert artifact["history_start_issue"] == "26001"
     assert artifact["history_cutoff_issue"] == "26040"
     assert artifact["short_history_override"] is True
+    assert artifact["history_verified"] is False
+    assert artifact["unverified_history_override"] is True
     assert artifact["pipeline_config"]["profile"] == "fast"
     assert artifact["pipeline_config"]["candidate_count"] == 10_000
     assert artifact["pipeline_config"]["optimizer_search_trials"] == 5_000
@@ -189,6 +196,22 @@ def test_generate_next_artifact_to_evaluate_latest_closed_loop(tmp_path: Path) -
     assert len(review["evaluations"]) == 5
     assert review["risk_disclaimer"] == DISCLAIMER
 
+    modified = load_draws_csv(draws)
+    modified.loc[0, "draw_date"] = "2025-12-31"
+    modified.to_csv(draws, index=False)
+    with pytest.raises(ValueError, match="history was modified"):
+        main(
+            [
+                "evaluate-latest",
+                "--draws",
+                str(draws),
+                "--prediction",
+                str(output),
+                "--output",
+                str(review_output),
+            ]
+        )
+
 
 def test_generate_next_rejects_dirty_git_without_explicit_override(
     tmp_path: Path,
@@ -210,6 +233,7 @@ def test_generate_next_rejects_dirty_git_without_explicit_override(
                 "--target-issue",
                 "26041",
                 "--allow-short-history",
+                "--allow-unverified-history",
             ]
         )
 
@@ -219,6 +243,23 @@ def test_generate_next_requires_explicit_target_issue(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit):
         main(["generate-next", "--draws", str(draws)])
+
+
+def test_formal_backtest_rejects_history_without_verified_manifest(tmp_path: Path) -> None:
+    draws = write_history(tmp_path / "draws.csv", count=10)
+
+    with pytest.raises(ValueError, match="verified history manifest"):
+        main(
+            [
+                "run-backtest",
+                "--draws",
+                str(draws),
+                "--min-history",
+                "10",
+                "--output",
+                str(tmp_path / "backtest.json"),
+            ]
+        )
 
 
 def test_evaluate_latest_command_uses_recorded_prize_context(tmp_path: Path) -> None:

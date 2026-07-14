@@ -14,9 +14,11 @@ data/processed/*
 !data/processed/.gitkeep
 outputs/backtests/*
 !outputs/backtests/.gitkeep
+!outputs/backtests/v05_observations.csv
 outputs/predictions/*
 !outputs/predictions/.gitkeep
 !outputs/predictions/*.json
 outputs/reports/*
 !outputs/reports/.gitkeep
 !outputs/reports/*.md
+!outputs/reports/ablation_results.csv

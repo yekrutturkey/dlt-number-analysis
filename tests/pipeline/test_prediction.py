@@ -114,7 +114,7 @@ def test_pipeline_profiles_expand_all_runtime_parameters() -> None:
     assert (final.candidate_count, final.optimizer_search_trials, final.parallel_workers) == (
         25_000,
         100_000,
-        4,
+        1,
     )
     assert PipelineConfig(profile="final", candidate_count=30_000).candidate_count == 30_000
 

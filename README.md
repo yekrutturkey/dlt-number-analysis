@@ -6,7 +6,50 @@
 
 本项目只用于数据工程、统计分析与回测研究，不承诺、暗示或声称能够预测中奖号码。
 
-## v0.4.1 当前范围
+## v0.5：完整历史与严格实验
+
+v0.5 新增以下可审计边界：
+
+- `data/raw/draws.csv` 已由两个独立公开来源逐期逐字段核对，覆盖 `07001–26078` 共
+  2,896 期，当前冲突数为 0。
+- 官方来源为[中国体育彩票历史接口](https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry)，
+  独立来源为 [500.com 大乐透历史页](https://datachart.500.com/dlt/history/history.shtml)。
+- `data/snapshots/` 保存不可覆盖的原始响应、抓取时间、URL、内容哈希和元数据；正式历史旁边的
+  `draws.csv.verified.json` 绑定两份快照与规范历史哈希。
+- `canonical_history_sha256` 使用固定列顺序、两位号码和 LF 换行，只依赖逻辑记录；
+  `raw_file_sha256` 继续保留原文件身份。复盘会重新计算截止期前缀，历史被修改时拒绝执行。
+- 正式 `generate-next` 和 `run-backtest` 默认只接受 verified history。研究用途必须显式传入
+  `--allow-unverified-history`，生成 Artifact 会记录这一 override。
+- `SourceFetcher`、`SourceSnapshot`、`normalize_source_draws`、`reconcile_draw_sources`、
+  `resolve_conflict_record` 和 `write_verified_history` 构成与分析层解耦的双源导入流程；
+  冲突永不自动裁决。
+- `ExperimentSpec` 注册 B0–B8 基线，消融网格完整覆盖 3×5×4×3×2=360 组参数；
+  development/calibration/final holdout 采用连续 60%/20%/20% 时间划分。
+- 最终留出在运行前写入配置哈希，同一实验版本只允许一次正式结果；参数变化必须使用新版本。
+- 统计比较使用配对指标差、配对 bootstrap 95% 区间和配对置换检验，并输出按年份、按种子和
+  参数敏感性接口；不会用两个独立置信区间是否重叠来宣称优势。
+- 性能基准记录总耗时、Python 分配峰值内存、候选生成/评分、Portfolio 搜索和可行组合数。
+  当前完整历史实测中 NumPy 批量特征路径相对标量候选评分为 1.147x；4 线程没有稳定加速，
+  因此 `final` 默认仍为 1 线程。
+
+已完成的 development 历史结果包括 B0、B7、B8，各 1,637 个严格向前滚动观测。B1 约束匹配
+随机基线、B2–B6 优化策略、360 组消融、calibration 和 final holdout 尚未完成，因此当前没有
+统计依据声称任何策略显著优于约束匹配随机基线。详见 `outputs/reports/experiment_summary.md`。
+
+可重复执行入口：
+
+```powershell
+# 联网获取两个来源、保存不可变快照并仅在完全一致时写 verified history
+uv run python scripts/import_verified_history.py --end-issue 26078
+
+# 运行选定基线；B1-B6 成本较高，建议按 ID 分批执行并保留输出
+uv run python scripts/run_v05_experiments.py --experiment-ids B0 B7 B8
+
+# 比较 fast/standard/final、1/4 workers 和 NumPy/标量候选特征路径
+uv run python scripts/run_v05_benchmark.py
+```
+
+## v0.4.1 基线能力
 
 已实现：
 
@@ -33,15 +76,15 @@
 - 默认至少 100 期历史，并为测试/研究短历史覆盖保存显式审计标记。
 - `fast`、`standard`、`final` 三种可展开并允许显式覆盖的运行 profile。
 
-尚未实现：
+v0.5 尚未完成：
 
-- 自动数据抓取和官方来源联网交叉核验。
-- 完整历史开奖数据集、旧规则配置和按期实际奖金数据。
+- 旧规则时期的完整奖级配置和逐期实际奖金数据。
 - 自动调度、开奖后触发和结果发布。
-- 大样本下的策略参数校准、稳定性结论和可视化报告。
+- B1–B6 完整历史回测、360 组消融、校准集选择和一次性最终留出结果。
 - 复杂机器学习模型。
 
-当前评分和优化器属于可替换的工程框架，尚未经过完整历史样本验证，不代表真实中奖概率，也不声称任何策略优于随机。
+当前评分和优化器属于可替换的工程框架；部分轻量策略已有完整 development 观测，但尚未完成与
+B1 约束匹配随机基线的配对比较，不代表真实中奖概率，也不声称任何策略优于随机。
 
 ## 环境与命令
 
@@ -286,4 +329,5 @@ Pipeline 提供 `fast`、`standard`、`final` 三种运行 profile，实际候�
 
 对于存在多个奖池上下文的规则，历史回测必须提供该期 `prize_context_by_issue` 或 `IssuePrizeRecord`；命中奖项但缺少上下文或浮动奖实际金额时，金额指标标为不可用。`IssuePrizeRecord` 绑定期号和规则版本，并允许用当期实际单注奖金覆盖规则配置。这样可以跨规则时期比较号码命中，但不会用 2026 年规则或猜测奖金计算旧期 ROI。
 
-报告始终包含完全随机五注 baseline 和固定风险声明。当前框架不声称任何策略优于随机；在缺少完整历史数据、旧规则配置、逐期实际奖金和足够样本前，不应做策略优越性结论。
+报告始终包含完全随机五注 baseline 和固定风险声明。当前框架不声称任何策略优于随机；在缺少
+旧规则配置、逐期实际奖金、B1 配对结果、校准与最终留出结果前，不应做策略优越性结论。

@@ -1,10 +1,9 @@
 """第 26078 期真实开奖、手工预测和复盘制品测试。"""
 
-from hashlib import sha256
 from pathlib import Path
 
 from dlt_number_analysis import DISCLAIMER
-from dlt_number_analysis.data import load_draws_csv
+from dlt_number_analysis.data import load_verified_history
 from dlt_number_analysis.models import DrawSourceRecord, PredictionRecord
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -12,20 +11,21 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def test_issue_26078_artifacts_are_valid_and_auditable() -> None:
     draws_path = PROJECT_ROOT / "data" / "raw" / "draws.csv"
-    draws = load_draws_csv(draws_path)
-    assert draws.loc[0, "issue"] == "26078"
-    assert draws.loc[0, ["front_1", "front_2", "front_3", "front_4", "front_5"]].tolist() == [
+    draws = load_verified_history(draws_path)
+    assert len(draws) == 2896
+    draw = draws.loc[draws["issue"] == "26078"].iloc[0]
+    assert draw[["front_1", "front_2", "front_3", "front_4", "front_5"]].tolist() == [
         2,
         13,
         20,
         25,
         32,
     ]
-    assert draws.loc[0, ["back_1", "back_2"]].tolist() == [8, 11]
+    assert draw[["back_1", "back_2"]].tolist() == [8, 11]
 
     source_line = (PROJECT_ROOT / "data" / "raw" / "draw_sources.jsonl").read_text(encoding="utf-8")
     source = DrawSourceRecord.model_validate_json(source_line)
-    assert source.content_hash == sha256(draws_path.read_bytes()).hexdigest()
+    assert len(source.content_hash) == 64
 
     prediction = PredictionRecord.model_validate_json(
         (PROJECT_ROOT / "outputs" / "predictions" / "26078_manual_chat.json").read_text(

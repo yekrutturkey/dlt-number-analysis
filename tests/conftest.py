@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
-_TEMP_ROOT = Path(__file__).resolve().parents[1] / ".pytest-tmp"
-_TEMP_ROOT.mkdir(exist_ok=True)
+_TEMP_ROOT = Path(tempfile.mkdtemp(prefix="dlt-number-analysis-pytest-"))
 os.environ.setdefault("PYTEST_DEBUG_TEMPROOT", str(_TEMP_ROOT))

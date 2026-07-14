@@ -9,13 +9,16 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
+from dlt_number_analysis.data.identity import canonical_history_sha256
+
 
 class HistoryAudit(BaseModel):
     """Identity and temporal bounds of the exact history file used by the CLI."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    raw_file_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_history_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     record_count: int = Field(ge=1)
     start_issue: str = Field(pattern=r"^\d+$")
     cutoff_issue: str = Field(pattern=r"^\d+$")
@@ -32,11 +35,12 @@ class GitAudit(BaseModel):
 
 
 def build_history_audit(path: str | Path, draws: pd.DataFrame) -> HistoryAudit:
-    """Hash the exact CSV bytes and bind them to the loaded history bounds."""
+    """Bind exact file identity and canonical logical identity to history bounds."""
     source = Path(path)
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    raw_digest = hashlib.sha256(source.read_bytes()).hexdigest()
     return HistoryAudit(
-        sha256=digest,
+        raw_file_sha256=raw_digest,
+        canonical_history_sha256=canonical_history_sha256(draws),
         record_count=len(draws),
         start_issue=str(draws.iloc[0]["issue"]),
         cutoff_issue=str(draws.iloc[-1]["issue"]),

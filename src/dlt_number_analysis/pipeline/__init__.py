@@ -1,5 +1,6 @@
 """End-to-end prediction pipeline shared by live generation and rolling backtests."""
 
+from dlt_number_analysis.data.identity import canonical_history_bytes, canonical_history_sha256
 from dlt_number_analysis.pipeline.artifacts import (
     NextPredictionArtifact,
     load_next_prediction_artifact,
@@ -31,6 +32,8 @@ __all__ = [
     "PipelineSeeds",
     "PredictionPipeline",
     "build_history_audit",
+    "canonical_history_bytes",
+    "canonical_history_sha256",
     "collect_git_audit",
     "load_next_prediction_artifact",
     "optimized_portfolio_strategy",

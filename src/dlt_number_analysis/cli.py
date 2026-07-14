@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from dlt_number_analysis import DISCLAIMER
 from dlt_number_analysis.backtesting import run_rolling_backtest
 from dlt_number_analysis.data import (
@@ -17,6 +19,7 @@ from dlt_number_analysis.data import (
     load_draws_csv,
     load_issue_prizes,
     load_prize_rule_schedule,
+    load_verified_history,
 )
 from dlt_number_analysis.evaluation import apply_issue_prize_record, evaluate_prediction
 from dlt_number_analysis.models import PredictionRecord, load_prediction_record
@@ -26,6 +29,7 @@ from dlt_number_analysis.pipeline import (
     PipelineSeeds,
     PredictionPipeline,
     build_history_audit,
+    canonical_history_sha256,
     collect_git_audit,
     load_next_prediction_artifact,
 )
@@ -105,7 +109,11 @@ def _validate_data(args: argparse.Namespace) -> int:
 
 
 def _run_backtest(args: argparse.Namespace) -> int:
-    draws = load_draws_csv(args.draws)
+    draws = (
+        load_draws_csv(args.draws)
+        if args.allow_unverified_history
+        else load_verified_history(args.draws)
+    )
     schedule = load_prize_rule_schedule(args.prize_rules)
     issue_prizes = load_issue_prizes(args.issue_prizes) if args.issue_prizes else {}
     pipeline_config = _pipeline_config(args) if args.include_optimized else None
@@ -133,7 +141,8 @@ def _run_backtest(args: argparse.Namespace) -> int:
 
 
 def _generate_next(args: argparse.Namespace) -> int:
-    draws = load_draws_csv(args.draws)
+    history_verified = not args.allow_unverified_history
+    draws = load_verified_history(args.draws) if history_verified else load_draws_csv(args.draws)
     cutoff_issue = str(draws.iloc[-1]["issue"])
     target_issue = str(args.target_issue)
     git_audit = collect_git_audit(PROJECT_ROOT)
@@ -153,6 +162,15 @@ def _generate_next(args: argparse.Namespace) -> int:
         random_seeds=seeds,
         allow_short_history=args.allow_short_history,
     )
+    prediction = result.prediction.model_copy(
+        update={
+            "parameters": {
+                **result.prediction.parameters,
+                "history_verified": history_verified,
+                "unverified_history_override": args.allow_unverified_history,
+            }
+        }
+    )
     artifact = NextPredictionArtifact(
         target_issue=target_issue,
         data_cutoff_issue=cutoff_issue,
@@ -160,15 +178,18 @@ def _generate_next(args: argparse.Namespace) -> int:
         git_commit_sha=git_audit.commit_sha,
         git_dirty=git_audit.dirty,
         git_diff_hash=git_audit.diff_hash,
-        history_sha256=history_audit.sha256,
+        raw_file_sha256=history_audit.raw_file_sha256,
+        canonical_history_sha256=history_audit.canonical_history_sha256,
         history_record_count=history_audit.record_count,
         history_start_issue=history_audit.start_issue,
         history_cutoff_issue=history_audit.cutoff_issue,
+        history_verified=history_verified,
+        unverified_history_override=args.allow_unverified_history,
         short_history_override=result.short_history_override,
         pipeline_config=config,
         random_seeds=seeds,
         candidate_pool_summary=result.candidate_pool_summary,
-        prediction=result.prediction,
+        prediction=prediction,
     )
     target = args.output or PROJECT_ROOT / "outputs" / "predictions" / f"{target_issue}.json"
     _write_json(artifact, target)
@@ -177,17 +198,26 @@ def _generate_next(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_prediction_input(path: Path) -> PredictionRecord:
+def _load_prediction_input(path: Path, draws: pd.DataFrame) -> PredictionRecord:
     """Accept either a bare prediction log or a complete next-prediction artifact."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, dict) and "prediction" in payload:
-        return load_next_prediction_artifact(path).prediction
+        artifact = load_next_prediction_artifact(path)
+        cutoff_matches = draws.index[
+            draws["issue"].astype(str) == artifact.data_cutoff_issue
+        ].tolist()
+        if len(cutoff_matches) != 1:
+            raise ValueError("current history does not contain the artifact cutoff issue")
+        prefix = draws.iloc[: cutoff_matches[0] + 1].copy()
+        if canonical_history_sha256(prefix) != artifact.canonical_history_sha256:
+            raise ValueError("history was modified before the artifact data cutoff")
+        return artifact.prediction
     return load_prediction_record(path)
 
 
 def _evaluate_latest(args: argparse.Namespace) -> int:
     draws = load_draws_csv(args.draws)
-    prediction = _load_prediction_input(args.prediction)
+    prediction = _load_prediction_input(args.prediction, draws)
     matching = draws.loc[draws["issue"].astype(str) == prediction.target_issue]
     if matching.empty:
         raise ValueError(f"draw history does not contain target issue {prediction.target_issue}")
@@ -237,6 +267,11 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--bootstrap-resamples", type=int, default=1000)
     backtest.add_argument("--include-optimized", action="store_true")
     backtest.add_argument(
+        "--allow-unverified-history",
+        action="store_true",
+        help="research-only override; formal backtests require a verified history manifest",
+    )
+    backtest.add_argument(
         "--output",
         type=Path,
         default=PROJECT_ROOT / "outputs" / "backtests" / "latest.json",
@@ -250,6 +285,11 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--random-seed", type=int, default=20260714)
     generate.add_argument("--output", type=Path)
     generate.add_argument("--allow-dirty", action="store_true")
+    generate.add_argument(
+        "--allow-unverified-history",
+        action="store_true",
+        help="research-only override; formal generation requires a verified history manifest",
+    )
     _add_pipeline_arguments(generate)
     generate.set_defaults(handler=_generate_next)
 

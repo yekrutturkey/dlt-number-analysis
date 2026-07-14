@@ -6,7 +6,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from dlt_number_analysis import DISCLAIMER
 from dlt_number_analysis.models import PredictionRecord
@@ -28,10 +35,16 @@ class NextPredictionArtifact(BaseModel):
     git_commit_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     git_dirty: bool
     git_diff_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    history_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    raw_file_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+        validation_alias=AliasChoices("raw_file_sha256", "history_sha256"),
+    )
+    canonical_history_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     history_record_count: int = Field(ge=1)
     history_start_issue: str = Field(pattern=r"^\d+$")
     history_cutoff_issue: str = Field(pattern=r"^\d+$")
+    history_verified: bool = True
+    unverified_history_override: bool = False
     short_history_override: bool = False
     pipeline_config: PipelineConfig
     random_seeds: PipelineSeeds
@@ -45,6 +58,11 @@ class NextPredictionArtifact(BaseModel):
         if value != DISCLAIMER:
             raise ValueError("next-prediction artifact is missing the fixed disclaimer")
         return value
+
+    @property
+    def history_sha256(self) -> str:
+        """Deprecated v0.4.1 accessor for the exact raw-file hash."""
+        return self.raw_file_sha256
 
     @model_validator(mode="after")
     def validate_bound_prediction(self) -> Self:
@@ -68,6 +86,14 @@ class NextPredictionArtifact(BaseModel):
             raise ValueError("artifact random_seeds do not match prediction parameters")
         if parameters.get("short_history_override") != self.short_history_override:
             raise ValueError("artifact short_history_override does not match prediction parameters")
+        if parameters.get("history_verified") != self.history_verified:
+            raise ValueError("artifact history_verified does not match prediction parameters")
+        if parameters.get("unverified_history_override") != self.unverified_history_override:
+            raise ValueError(
+                "artifact unverified_history_override does not match prediction parameters"
+            )
+        if self.history_verified == self.unverified_history_override:
+            raise ValueError("exactly one history verification state must be true")
         return self
 
 
