@@ -73,7 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--random-baseline-seeds", type=int, default=1000)
     parser.add_argument("--bootstrap-resamples", type=int, default=1000)
+    parser.add_argument("--minimum-bank-size", type=int, default=500)
+    parser.add_argument("--maximum-bank-search-trials", type=int, default=80_000)
     parser.add_argument("--report-only", action="store_true")
+    parser.add_argument(
+        "--inference-context",
+        choices=("formal", "smoke"),
+        default="formal",
+    )
     parser.add_argument(
         "--legacy-observations",
         type=Path,
@@ -308,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
                     "minimum_history": args.minimum_history,
                     "random_baseline_seed_count": args.random_baseline_seeds,
                     "bootstrap_resamples": args.bootstrap_resamples,
+                    "minimum_bank_size": args.minimum_bank_size,
+                    "maximum_bank_search_trials": args.maximum_bank_search_trials,
                     "holdout_lock_path": str(args.holdout_lock.resolve()),
                 },
             )
@@ -327,7 +336,12 @@ def main(argv: list[str] | None = None) -> int:
             failures = failures or bool(report.failed_tasks)
     observations = store.load_all()
     comparisons = compare_to_constraint_matched_baseline(observations)
-    write_experiment_summary_report(observations, comparisons, args.summary_output)
+    write_experiment_summary_report(
+        observations,
+        comparisons,
+        args.summary_output,
+        inference_context=args.inference_context,
+    )
     write_ablation_results_csv(_ablation_status_rows(observations), args.ablation_output)
     write_holdout_results_report(observations, args.holdout_output)
     scheduler_reports = tuple(

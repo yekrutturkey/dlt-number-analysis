@@ -372,3 +372,22 @@ def test_optimized_selection_scores_the_same_feasible_bank(
     assert scored.evaluated_portfolios == bank.bank_size
     assert scored.bank_hash == bank.bank_hash
     assert scored.selection.optimizer_parameters["bank_hash"] == bank.bank_hash
+
+
+def test_feasible_bank_expands_search_until_minimum_size(
+    candidate_pool: CandidatePool,
+) -> None:
+    bank = build_feasible_portfolio_bank(
+        candidate_pool,
+        bank_seed=5103,
+        search_trials=100,
+        maximum_search_trials=2_000,
+        minimum_bank_size=100,
+        maximum_bank_size=120,
+    )
+
+    assert bank.initial_search_trials == 100
+    assert bank.search_trials > bank.initial_search_trials
+    assert bank.search_expansion_count > 0
+    assert bank.bank_size >= 100
+    assert bank.minimum_bank_size == 100

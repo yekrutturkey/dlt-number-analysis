@@ -152,7 +152,10 @@ class FeasiblePortfolioBank(BaseModel):
     constraints: PortfolioConstraints
     constraints_signature: str = Field(pattern=r"^[0-9a-f]{64}$")
     candidate_numbers_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    initial_search_trials: int = Field(ge=1)
     search_trials: int = Field(ge=1)
+    search_expansion_count: int = Field(ge=0)
+    minimum_bank_size: int = Field(ge=1)
     attempted_portfolios: int = Field(ge=1)
     feasible_attempt_count: int = Field(ge=1)
     bank_size: int = Field(ge=1)
@@ -175,6 +178,12 @@ class FeasiblePortfolioBank(BaseModel):
             raise ValueError("constraints_signature does not match constraints")
         if self.bank_size != len(self.entries):
             raise ValueError("bank_size does not match entries")
+        if self.bank_size < self.minimum_bank_size:
+            raise ValueError("bank_size is below the required minimum")
+        if self.search_trials < self.initial_search_trials:
+            raise ValueError("search_trials must not be below initial_search_trials")
+        if self.attempted_portfolios > self.search_trials:
+            raise ValueError("attempted_portfolios exceeds the final search budget")
         if len({entry.entry_hash for entry in self.entries}) != len(self.entries):
             raise ValueError("feasible Portfolio bank contains duplicate entries")
         if not isclose(
@@ -293,11 +302,21 @@ def build_feasible_portfolio_bank(
     constraints: PortfolioConstraints | None = None,
     search_trials: int = 25_000,
     maximum_bank_size: int = 2_000,
+    minimum_bank_size: int = 1,
+    maximum_search_trials: int | None = None,
+    search_trial_growth_factor: int = 2,
     cache: MutableMapping[BankCacheKey, FeasiblePortfolioBank] | None = None,
 ) -> FeasiblePortfolioBank:
-    """Generate the reusable feasible set without reading any candidate score or ID."""
-    if search_trials < 1 or maximum_bank_size < 1:
-        raise ValueError("search_trials and maximum_bank_size must be positive")
+    """Generate a reusable bank, expanding the search until its minimum size is met."""
+    if search_trials < 1 or maximum_bank_size < 1 or minimum_bank_size < 1:
+        raise ValueError("search trials and bank sizes must be positive")
+    if minimum_bank_size > maximum_bank_size:
+        raise ValueError("minimum_bank_size must not exceed maximum_bank_size")
+    final_search_ceiling = maximum_search_trials or search_trials
+    if final_search_ceiling < search_trials:
+        raise ValueError("maximum_search_trials must not be below search_trials")
+    if search_trial_growth_factor < 2:
+        raise ValueError("search_trial_growth_factor must be at least 2")
     active_constraints = constraints or PortfolioConstraints()
     signature = portfolio_constraints_signature(active_constraints)
     cache_key = (pool.target_issue, bank_seed, signature)
@@ -306,6 +325,8 @@ def build_feasible_portfolio_bank(
         cached = cache[cache_key]
         if cached.candidate_numbers_hash != number_hash:
             raise ValueError("cached bank candidate numbers differ for the same bank identity")
+        if cached.bank_size < minimum_bank_size:
+            raise ValueError("cached bank is below the requested minimum_bank_size")
         return cached
 
     started = perf_counter()
@@ -319,35 +340,51 @@ def build_feasible_portfolio_bank(
     entries: dict[str, FeasiblePortfolioEntry] = {}
     feasible_attempt_count = 0
     attempted = 0
-    for trial_index in range(1, search_trials + 1):
-        attempted = trial_index
-        selected = tuple(
-            sorted(
-                rng.sample(canonical_candidates, active_constraints.ticket_count),
-                key=lambda item: (item.front_numbers, item.back_numbers),
+    initial_search_trials = search_trials
+    active_search_trials = search_trials
+    expansion_count = 0
+    while True:
+        for trial_index in range(attempted + 1, active_search_trials + 1):
+            attempted = trial_index
+            selected = tuple(
+                sorted(
+                    rng.sample(canonical_candidates, active_constraints.ticket_count),
+                    key=lambda item: (item.front_numbers, item.back_numbers),
+                )
             )
-        )
-        if not _base_constraints_pass(selected, active_constraints):
-            continue
-        classification = _score_independent_classification(selected, active_constraints)
-        if classification is None:
-            continue
-        feasible_attempt_count += 1
-        core, support, stable_indices = classification
-        tickets = tuple(_ticket(item) for item in selected)
-        entry_hash = _entry_hash(tickets, core, support, stable_indices)
-        entries.setdefault(
-            entry_hash,
-            FeasiblePortfolioEntry(
-                tickets=tickets,
-                core_front_numbers=core,
-                support_front_numbers=support,
-                stable_ticket_indices=stable_indices,
-                entry_hash=entry_hash,
-            ),
-        )
-        if len(entries) >= maximum_bank_size:
+            if not _base_constraints_pass(selected, active_constraints):
+                continue
+            classification = _score_independent_classification(selected, active_constraints)
+            if classification is None:
+                continue
+            feasible_attempt_count += 1
+            core, support, stable_indices = classification
+            tickets = tuple(_ticket(item) for item in selected)
+            entry_hash = _entry_hash(tickets, core, support, stable_indices)
+            entries.setdefault(
+                entry_hash,
+                FeasiblePortfolioEntry(
+                    tickets=tickets,
+                    core_front_numbers=core,
+                    support_front_numbers=support,
+                    stable_ticket_indices=stable_indices,
+                    entry_hash=entry_hash,
+                ),
+            )
+            if len(entries) >= maximum_bank_size:
+                break
+        if len(entries) >= minimum_bank_size:
             break
+        if active_search_trials >= final_search_ceiling:
+            raise PortfolioOptimizationError(
+                "feasible Portfolio bank did not reach minimum_bank_size within the "
+                "maximum seeded search budget"
+            )
+        active_search_trials = min(
+            final_search_ceiling,
+            active_search_trials * search_trial_growth_factor,
+        )
+        expansion_count += 1
     if not entries:
         raise PortfolioOptimizationError(
             "no feasible Portfolio bank entries were found within the seeded search budget"
@@ -361,7 +398,10 @@ def build_feasible_portfolio_bank(
         "constraints": active_constraints.model_dump(mode="json"),
         "constraints_signature": signature,
         "candidate_numbers_hash": number_hash,
-        "search_trials": search_trials,
+        "initial_search_trials": initial_search_trials,
+        "search_trials": active_search_trials,
+        "search_expansion_count": expansion_count,
+        "minimum_bank_size": minimum_bank_size,
         "attempted_portfolios": attempted,
         "feasible_attempt_count": feasible_attempt_count,
         "bank_size": len(ordered_entries),

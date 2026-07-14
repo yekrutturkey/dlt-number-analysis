@@ -161,6 +161,8 @@ def _shared_bank_experiment_batch(
     holdout_lock_path: str | Path | None = None,
     parallel_workers: int | None = None,
     target_issues: Sequence[str] | None = None,
+    minimum_bank_size: int = 500,
+    maximum_bank_search_trials: int = 80_000,
 ) -> ExperimentBatchResult:
     """Run B1-B6 target-first so candidates and feasible banks are truly shared."""
     del parallel_workers
@@ -230,6 +232,8 @@ def _shared_bank_experiment_batch(
                     candidate_count=profile_defaults["candidate_count"],
                     bank_search_trials=profile_defaults["optimizer_search_trials"],
                     maximum_bank_size=min(2_000, profile_defaults["optimizer_search_trials"]),
+                    minimum_bank_size=minimum_bank_size,
+                    maximum_bank_search_trials=maximum_bank_search_trials,
                 )
                 base_pool = ablation_context.candidate_pool
                 candidate_requests += len(specifications)
@@ -253,6 +257,7 @@ def _shared_bank_experiment_batch(
             banks_by_signature: dict[str, FeasiblePortfolioBank] = {}
             predictions: dict[str, PredictionRecord] = {}
             audit_by_strategy: dict[str, dict[str, object]] = {}
+            target_bank_reuse_count = 0
             for spec in specifications:
                 signature = portfolio_constraints_signature(spec.portfolio_constraints)
                 bank_seed = deterministic_subseed(seed, target_issue, "bank", signature)
@@ -264,11 +269,14 @@ def _shared_bank_experiment_batch(
                         constraints=spec.portfolio_constraints,
                         search_trials=profile_defaults["optimizer_search_trials"],
                         maximum_bank_size=min(2_000, profile_defaults["optimizer_search_trials"]),
+                        minimum_bank_size=minimum_bank_size,
+                        maximum_search_trials=maximum_bank_search_trials,
                     )
                 else:
                     bank = ablation_context.banks_by_constraints_signature[signature]
                 if was_cached:
                     bank_reuse_count += 1
+                    target_bank_reuse_count += 1
                 else:
                     banks_by_signature[signature] = bank
                     if ablation_context is None:
@@ -341,6 +349,10 @@ def _shared_bank_experiment_batch(
                             "bank_seed": bank.bank_seed,
                             "bank_size": bank.bank_size,
                             "bank_acceptance_rate": bank.acceptance_rate,
+                            "bank_initial_search_trials": bank.initial_search_trials,
+                            "bank_search_trials": bank.search_trials,
+                            "bank_search_expansion_count": bank.search_expansion_count,
+                            "bank_minimum_size": bank.minimum_bank_size,
                             "bank_hash": bank.bank_hash,
                             "constraints_signature": bank.constraints_signature,
                             "candidate_numbers_hash": bank.candidate_numbers_hash,
@@ -356,10 +368,24 @@ def _shared_bank_experiment_batch(
                     "bank_seed": bank.bank_seed,
                     "bank_size": bank.bank_size,
                     "bank_acceptance_rate": bank.acceptance_rate,
+                    "bank_initial_search_trials": bank.initial_search_trials,
+                    "bank_search_trials": bank.search_trials,
+                    "bank_search_expansion_count": bank.search_expansion_count,
+                    "bank_minimum_size": bank.minimum_bank_size,
                     "bank_hash": bank.bank_hash,
                     "candidate_numbers_hash": bank.candidate_numbers_hash,
                     "constraints_signature": bank.constraints_signature,
                 }
+            target_bank_generation_count = len(banks_by_signature)
+            for audit in audit_by_strategy.values():
+                audit.update(
+                    {
+                        "target_candidate_generation_count": len(cache.candidate_pools),
+                        "target_candidate_reuse_count": cache.candidate_hits,
+                        "target_bank_generation_count": target_bank_generation_count,
+                        "target_portfolio_bank_reuse_count": target_bank_reuse_count,
+                    }
+                )
             strategies = {
                 name: _prediction_strategy(prediction) for name, prediction in predictions.items()
             }
@@ -556,6 +582,8 @@ def run_experiment(
     holdout_lock_path: str | Path | None = None,
     parallel_workers: int | None = None,
     target_issues: Sequence[str] | None = None,
+    minimum_bank_size: int = 500,
+    maximum_bank_search_trials: int = 80_000,
 ) -> ExperimentBatchResult:
     """Run one experiment, routing B1-B6 through the shared feasible-bank path."""
     options = {
@@ -575,6 +603,8 @@ def run_experiment(
             draws,
             (spec,),
             target_issues=target_issues,
+            minimum_bank_size=minimum_bank_size,
+            maximum_bank_search_trials=maximum_bank_search_trials,
             **options,
         )
     if target_issues is not None:

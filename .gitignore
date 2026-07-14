@@ -22,3 +22,4 @@ outputs/reports/*
 !outputs/reports/.gitkeep
 !outputs/reports/*.md
 !outputs/reports/ablation_results.csv
+!outputs/reports/v051_paired_smoke_comparisons.csv

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
@@ -232,6 +233,8 @@ def write_experiment_summary_report(
     observations: pd.DataFrame,
     comparisons: Sequence[ExperimentComparison],
     path: str | Path,
+    *,
+    inference_context: Literal["formal", "smoke"] = "formal",
 ) -> Path:
     """Write phase-separated results and paired-inference conclusions."""
     summary = summarize_observations(observations)
@@ -258,22 +261,33 @@ def write_experiment_summary_report(
             [comparison.model_dump(mode="python") for comparison in comparisons]
         )
         lines.append(_markdown_table(comparison_frame))
-        significant = [
-            comparison
-            for comparison in comparisons
-            if comparison.statistically_significant_advantage
-        ]
-        lines.extend(
-            [
-                "",
-                (
-                    "结论仅依据配对 bootstrap 与配对置换检验；"
-                    "没有使用两个独立置信区间是否重叠来判断优势；"
-                    "正式显著性结论采用更保守的 Holm 校正。"
-                ),
-                f"显著优势条目数：{len(significant)}。",
+        if inference_context == "smoke":
+            lines.extend(
+                [
+                    "",
+                    (
+                        "本表是配对计算冒烟检查；不使用这 100 期选择参数，"
+                        "也不根据本表声明任何策略优势。"
+                    ),
+                ]
+            )
+        else:
+            significant = [
+                comparison
+                for comparison in comparisons
+                if comparison.statistically_significant_advantage
             ]
-        )
+            lines.extend(
+                [
+                    "",
+                    (
+                        "结论仅依据配对 bootstrap 与配对置换检验；"
+                        "没有使用两个独立置信区间是否重叠来判断优势；"
+                        "正式显著性结论采用更保守的 Holm 校正。"
+                    ),
+                    f"显著优势条目数：{len(significant)}。",
+                ]
+            )
     else:
         lines.append("缺少至少 30 个同一期次、同一种子的 B1 配对结果，暂不能进行统计比较。")
     lines.extend(["", f"> {DISCLAIMER}"])

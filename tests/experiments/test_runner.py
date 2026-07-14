@@ -101,6 +101,33 @@ def test_b1_and_b2_share_candidates_bank_and_constraints_for_one_target() -> Non
     )
     assert result.executions[0].candidate_cache_hit_rate == 0.5
     assert result.executions[0].portfolio_bank_reuse_count == 1
+    assert set(result.observations["target_candidate_generation_count"]) == {1}
+    assert set(result.observations["target_candidate_reuse_count"]) == {1}
+    assert set(result.observations["target_bank_generation_count"]) == {1}
+    assert set(result.observations["target_portfolio_bank_reuse_count"]) == {1}
+
+
+def test_b1_through_b6_build_one_bank_and_reuse_it_five_times() -> None:
+    specs = baseline_experiment_specs(seeds=(79,))[1:7]
+
+    result = run_experiment_batch(
+        _history(),
+        specs,
+        minimum_history=3,
+        target_issues=("26004",),
+        random_baseline_seed_count=1000,
+        bootstrap_resamples=100,
+        minimum_bank_size=100,
+    )
+
+    assert len(result.observations) == 6
+    assert result.observations["candidate_numbers_hash"].nunique() == 1
+    assert result.observations["constraints_signature"].nunique() == 1
+    assert result.observations["bank_hash"].nunique() == 1
+    assert set(result.observations["target_bank_generation_count"]) == {1}
+    assert set(result.observations["target_portfolio_bank_reuse_count"]) == {5}
+    assert all(execution.portfolio_bank_reuse_count == 5 for execution in result.executions)
+    assert result.observations["bank_size"].min() >= 100
 
 
 def test_small_ablation_batch_uses_shared_cube_and_constraint_bank() -> None:

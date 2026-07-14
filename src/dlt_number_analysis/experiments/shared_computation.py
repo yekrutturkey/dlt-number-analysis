@@ -256,6 +256,8 @@ class SharedComputationCache:
         constraints: PortfolioConstraints,
         search_trials: int,
         maximum_bank_size: int,
+        minimum_bank_size: int = 1,
+        maximum_search_trials: int | None = None,
     ) -> FeasiblePortfolioBank:
         """Build a constraint bank once and count subsequent reuse."""
         key = (pool.target_issue, bank_seed, portfolio_constraints_signature(constraints))
@@ -267,6 +269,8 @@ class SharedComputationCache:
             constraints=constraints,
             search_trials=search_trials,
             maximum_bank_size=maximum_bank_size,
+            minimum_bank_size=minimum_bank_size,
+            maximum_search_trials=maximum_search_trials,
             cache=self.portfolio_banks,
         )
         if existed:
@@ -308,6 +312,8 @@ def build_shared_ablation_context(
     candidate_count: int = 10_000,
     bank_search_trials: int = 5_000,
     maximum_bank_size: int = 1_000,
+    minimum_bank_size: int = 1,
+    maximum_bank_search_trials: int = 80_000,
 ) -> SharedAblationContext:
     """Build one candidate set, one 15x4 score cube, and exactly six banks."""
     active_cache = cache or SharedComputationCache()
@@ -329,6 +335,8 @@ def build_shared_ablation_context(
             constraints=constraints,
             search_trials=bank_search_trials,
             maximum_bank_size=maximum_bank_size,
+            minimum_bank_size=minimum_bank_size,
+            maximum_search_trials=maximum_bank_search_trials,
         )
         banks[signature] = bank
         bank_seconds += bank.generation_seconds

@@ -38,6 +38,8 @@ def execute_experiment_process_task(
         minimum_history=int(parameters.get("minimum_history", 100)),
         random_baseline_seed_count=int(parameters.get("random_baseline_seed_count", 1000)),
         bootstrap_resamples=int(parameters.get("bootstrap_resamples", 1000)),
+        minimum_bank_size=int(parameters.get("minimum_bank_size", 500)),
+        maximum_bank_search_trials=int(parameters.get("maximum_bank_search_trials", 80_000)),
         prize_tables=prize_tables,
         holdout_lock_path=(
             str(parameters["holdout_lock_path"]) if "holdout_lock_path" in parameters else None
