@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dlt_number_analysis.data import DrawRecord
 from dlt_number_analysis.evaluation import (
+    PrizeRuleSchedule,
     evaluate_prediction,
     evaluate_ticket,
     load_prize_table,
@@ -140,3 +141,18 @@ def test_seventh_prize_remains_five_when_pool_is_below_800m() -> None:
 
     assert evaluation.prize_tier == "七等奖"
     assert evaluation.prize_amount == Decimal("5")
+
+
+def test_prize_rule_schedule_selects_rule_by_historical_effective_boundary() -> None:
+    current = load_prize_table(PRIZE_TABLE_PATH)
+    old = current.model_copy(
+        update={
+            "version": "test-old-rule",
+            "effective_from_issue": "25000",
+        }
+    )
+    schedule = PrizeRuleSchedule(tables=(current, old))
+
+    assert schedule.table_for_issue("24999") is None
+    assert schedule.table_for_issue("25001") == old
+    assert schedule.table_for_issue("26014") == current

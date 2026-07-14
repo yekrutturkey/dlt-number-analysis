@@ -6,13 +6,15 @@ from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
+import pytest
 from pydantic import JsonValue
 
 from dlt_number_analysis import DISCLAIMER
 from dlt_number_analysis.backtesting import run_rolling_backtest
 from dlt_number_analysis.data import CSV_COLUMNS
-from dlt_number_analysis.evaluation import load_prize_table
+from dlt_number_analysis.evaluation import IssuePrizeRecord, load_prize_table
 from dlt_number_analysis.models import PredictionRecord, TicketRecord
+from dlt_number_analysis.scoring import NumberArea, uniform_score
 
 PRIZE_TABLE_PATH = Path(__file__).resolve().parents[2] / "config" / "prize_tiers.json"
 
@@ -78,6 +80,10 @@ def test_rolling_backtest_outputs_requested_metrics_and_random_baseline() -> Non
         strategies={"fixed": fixed_strategy},
         min_history=2,
         base_random_seed=10,
+        prize_context_by_issue={
+            "26016": "pool_below_800m",
+            "26017": "pool_below_800m",
+        },
     )
 
     assert report.includes_random_baseline is True
@@ -92,10 +98,25 @@ def test_rolling_backtest_outputs_requested_metrics_and_random_baseline() -> Non
     assert fixed_26016.data_cutoff_issue == "26015"
     assert fixed_26016.best_front_hits == 2
     assert fixed_26016.best_back_hits == 1
+    assert fixed_26016.best_total_hits == 3
+    assert fixed_26016.at_least_three_front is False
+    assert fixed_26016.at_least_2_plus_1 is True
+    assert fixed_26016.hit_concentration_ratio == pytest.approx(0.6)
     assert fixed_26016.any_prize is True
     assert fixed_26016.total_cost == Decimal("10")
     assert fixed_26016.total_prize == Decimal("5")
     assert fixed_26016.roi == Decimal("-0.5")
+    assert fixed_26016.random_baseline_seed_count == 1000
+    assert 0 <= fixed_26016.best_total_hits_percentile <= 100
+    assert (
+        fixed_26016.best_total_hits_percentile_ci_lower
+        <= fixed_26016.best_total_hits_percentile_ci_upper
+    )
+    assert report.random_baseline_summaries[0].seed_count == 1000
+    fixed_summary = next(
+        summary for summary in report.strategy_summaries if summary.strategy_name == "fixed"
+    )
+    assert fixed_summary.period_count == 2
 
 
 def test_adding_future_draw_does_not_change_earlier_backtest_result() -> None:
@@ -107,6 +128,7 @@ def test_adding_future_draw_does_not_change_earlier_backtest_result() -> None:
         strategies={"fixed": fixed_strategy},
         min_history=2,
         base_random_seed=10,
+        prize_context_by_issue={"26016": "pool_below_800m"},
     )
     full_report = run_rolling_backtest(
         draws,
@@ -114,9 +136,104 @@ def test_adding_future_draw_does_not_change_earlier_backtest_result() -> None:
         strategies={"fixed": fixed_strategy},
         min_history=2,
         base_random_seed=10,
+        prize_context_by_issue={
+            "26016": "pool_below_800m",
+            "26017": "pool_below_800m",
+        },
     )
 
     earlier_results = tuple(
         result for result in full_report.results if result.target_issue == "26016"
     )
     assert short_report.results == earlier_results
+
+
+def test_number_scorer_only_receives_history_before_each_target() -> None:
+    observed: list[tuple[NumberArea, int, str]] = []
+
+    def observing_scorer(history: pd.DataFrame, *, area: NumberArea) -> dict[int, float]:
+        observed.append((area, len(history), str(history.iloc[-1]["issue"])))
+        return uniform_score(history, area=area)
+
+    run_rolling_backtest(
+        make_draws(),
+        load_prize_table(PRIZE_TABLE_PATH),
+        strategies={"fixed": fixed_strategy},
+        min_history=2,
+        number_scorer=observing_scorer,
+        prize_context_by_issue={
+            "26016": "pool_below_800m",
+            "26017": "pool_below_800m",
+        },
+    )
+
+    assert observed == [
+        ("front", 2, "26015"),
+        ("back", 2, "26015"),
+        ("front", 3, "26016"),
+        ("back", 3, "26016"),
+    ]
+
+
+def test_current_seven_tier_rule_is_not_used_for_older_issues() -> None:
+    old_draws = make_draws().iloc[:3].copy()
+    old_draws["issue"] = ["25001", "25002", "25003"]
+
+    report = run_rolling_backtest(
+        old_draws,
+        load_prize_table(PRIZE_TABLE_PATH),
+        strategies={"fixed": fixed_strategy},
+        min_history=2,
+    )
+
+    fixed = next(result for result in report.results if result.strategy_name == "fixed")
+    assert fixed.best_total_hits >= 0
+    assert fixed.prize_rule_version is None
+    assert fixed.any_prize is None
+    assert fixed.total_prize is None
+    assert fixed.roi is None
+    assert fixed.prize_data_available is False
+    summary = next(item for item in report.strategy_summaries if item.strategy_name == "fixed")
+    assert summary.average_prize is None
+    assert summary.median_prize is None
+    assert summary.longest_no_prize_streak is None
+    assert summary.monetary_metrics_complete is False
+
+
+def test_issue_actual_prize_record_overrides_rule_amount() -> None:
+    table = load_prize_table(PRIZE_TABLE_PATH)
+    record = IssuePrizeRecord(
+        issue="26016",
+        prize_table_version=table.version,
+        prize_context="pool_below_800m",
+        actual_amount_by_tier={"七等奖": Decimal("9")},
+    )
+
+    report = run_rolling_backtest(
+        make_draws().iloc[:3].copy(),
+        table,
+        strategies={"fixed": fixed_strategy},
+        min_history=2,
+        issue_prize_records={"26016": record},
+    )
+
+    fixed = next(result for result in report.results if result.strategy_name == "fixed")
+    assert fixed.total_prize == Decimal("9")
+    assert fixed.roi == Decimal("-0.1")
+    assert fixed.prize_rule_version == table.version
+
+
+def test_missing_historical_pool_context_keeps_hits_but_disables_roi() -> None:
+    report = run_rolling_backtest(
+        make_draws().iloc[:3].copy(),
+        load_prize_table(PRIZE_TABLE_PATH),
+        strategies={"fixed": fixed_strategy},
+        min_history=2,
+    )
+
+    fixed = next(result for result in report.results if result.strategy_name == "fixed")
+    assert fixed.best_total_hits == 3
+    assert fixed.any_prize is True
+    assert fixed.total_prize is None
+    assert fixed.roi is None
+    assert fixed.prize_data_available is False
