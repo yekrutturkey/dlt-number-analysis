@@ -6,6 +6,52 @@
 
 本项目只用于数据工程、统计分析与回测研究，不承诺、暗示或声称能够预测中奖号码。
 
+## v0.5.1：实验正确性与计算复用
+
+v0.5.1 修正约束匹配随机基线并建立可中断恢复的共享计算路径：
+
+- B1 不再调用 `optimize_portfolio`。`build_feasible_portfolio_bank` 只按号码和硬约束生成
+  `FeasiblePortfolioBank`，B1 使用独立种子从银行均匀随机抽取；候选分数只在抽取后用于审计，
+  不参与选择。银行身份不含 `candidate_id`，候选编号或顺序变化不会改变 B1 号码分布。
+- 同一 `target_issue`、seed 和约束签名只生成一次银行，并保存 bank seed、bank size、
+  acceptance rate、bank hash 和候选号集合哈希。B2–B6 与 B1 共享候选号、银行成员和约束，
+  但 B2–B6 根据各自目标函数对同一个银行评分。
+- 360 组消融采用目标期优先的共享路径：候选号与原始结构特征各计算一次，15 种
+  window/decay 号码分通过 NumPy 批量计算，4 种结构权重组成评分矩阵，6 种
+  pool-size/core-count 约束各生成一个银行。不会重复运行 360 次完整 Pipeline。
+- 原始实验观测写入
+  `outputs/experiments/{phase}/{experiment_id}/seed_{seed}.parquet`。五字段主键重复会拒绝，
+  已完成目标期自动跳过，部分分区只追加缺失期次；三个时间阶段物理隔离。旧版 CSV 只作为
+  一次性迁移来源，不再作为新结果写入目标。
+- `ProcessPoolExecutor` 按目标期块或实验配置分片，默认进程数为
+  `min(cpu_count - 1, 8)`；每个任务保存确定性子种子、worker 数量、主机、开始/结束时间、
+  CPU/墙钟时间和失败任务。Python Portfolio 搜索不使用 ThreadPool。
+- 历史审计新增年度期号缺口、开奖日期异常、官方分页重复、来源记录数和 verified prefix
+  检查。真实缺失、分页重叠、来源不一致或前缀被修改均阻止正式实验；长假期等日期 warning
+  只进入报告，不修改数据，也不阻断运行。
+- 消融阶段固定为 screening（开发集每 5 期取 1 期、360 组、1 seed）、
+  full development（前 30 组、3 seeds）、calibration（前 5–10 组、5 seeds）和一次性
+  final holdout（冻结 1 组）。统计报告同时提供 Holm 与 Benjamini–Hochberg 修正。
+
+本阶段只运行了 B1 单期正确性验证：目标期 `08008`、截止期 `08007`，银行含 1,191 个
+唯一可行 Portfolio，5,000 次尝试的接受率为 23.82%。该单期结果仅验证执行链路和审计字段，
+不能用于策略比较或显著性结论。完整 B1–B6 和 360 组消融仍未运行。
+
+```powershell
+# 单期或小批量运行；重复执行会自动跳过已完成主键
+uv run python scripts/run_v05_experiments.py `
+  --experiment-ids B1 --phase development --target-issues 08008 --workers 1
+
+# 只从 Parquet 分区汇总报告，不运行实验
+uv run python scripts/run_v05_experiments.py --report-only
+
+# 非破坏性重建历史完整性报告
+uv run python scripts/audit_verified_history.py
+```
+
+共享银行和 ProcessPool 指标汇总见 `outputs/reports/experiment_runtime.md`；每次任务的完整主机、
+子种子、开始结束时间和失败列表保存在 `outputs/experiments/run_metadata/`。
+
 ## v0.5：完整历史与严格实验
 
 v0.5 新增以下可审计边界：
@@ -32,8 +78,8 @@ v0.5 新增以下可审计边界：
   当前完整历史实测中 NumPy 批量特征路径相对标量候选评分为 1.147x；4 线程没有稳定加速，
   因此 `final` 默认仍为 1 线程。
 
-已完成的 development 历史结果包括 B0、B7、B8，各 1,637 个严格向前滚动观测。B1 约束匹配
-随机基线、B2–B6 优化策略、360 组消融、calibration 和 final holdout 尚未完成，因此当前没有
+已完成的 development 历史结果包括 B0、B7、B8，各 1,637 个严格向前滚动观测；另有 B1
+单期正确性验证。B1 完整基线、B2–B6 优化策略、360 组消融、calibration 和 final holdout 尚未完成，因此当前没有
 统计依据声称任何策略显著优于约束匹配随机基线。详见 `outputs/reports/experiment_summary.md`。
 
 可重复执行入口：
@@ -42,8 +88,8 @@ v0.5 新增以下可审计边界：
 # 联网获取两个来源、保存不可变快照并仅在完全一致时写 verified history
 uv run python scripts/import_verified_history.py --end-issue 26078
 
-# 运行选定基线；B1-B6 成本较高，建议按 ID 分批执行并保留输出
-uv run python scripts/run_v05_experiments.py --experiment-ids B0 B7 B8
+# 运行小批量基线；新观测追加到分区 Parquet，已完成主键自动跳过
+uv run python scripts/run_v05_experiments.py --experiment-ids B1 --target-issues 08008
 
 # 比较 fast/standard/final、1/4 workers 和 NumPy/标量候选特征路径
 uv run python scripts/run_v05_benchmark.py
@@ -76,7 +122,7 @@ uv run python scripts/run_v05_benchmark.py
 - 默认至少 100 期历史，并为测试/研究短历史覆盖保存显式审计标记。
 - `fast`、`standard`、`final` 三种可展开并允许显式覆盖的运行 profile。
 
-v0.5 尚未完成：
+v0.5.1 尚未完成：
 
 - 旧规则时期的完整奖级配置和逐期实际奖金数据。
 - 自动调度、开奖后触发和结果发布。
@@ -110,7 +156,8 @@ dlt-number-analysis/
 │   └── processed/           # 校验或特征处理后的数据
 ├── config/                  # 奖级、奖金和票价配置
 ├── outputs/
-│   ├── backtests/           # 滚动回测结果
+│   ├── backtests/           # v0.5 以前的滚动回测结果与迁移来源
+│   ├── experiments/         # 按 phase/experiment/seed 分区的追加式 Parquet 与运行元数据
 │   ├── predictions/         # 预测日志
 │   └── reports/             # 复盘报告
 ├── scripts/                 # 可重复执行的制品生成脚本

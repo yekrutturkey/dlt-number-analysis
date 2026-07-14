@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from math import isfinite
@@ -209,6 +209,137 @@ def generate_candidate_pool(
             },
         },
         candidates=tuple(candidates),
+    )
+
+
+def rescore_candidate_pool_with_vectors(
+    pool: CandidatePool,
+    *,
+    scorer_spec: ScorerSpec,
+    front_candidate_scores: Sequence[float],
+    back_candidate_scores: Sequence[float],
+    number_candidate_scores: Sequence[float],
+    number_score_weight: float,
+    structure_score_weight: float,
+    scoring_method: str,
+    combined_candidate_scores: Sequence[float] | None = None,
+) -> CandidatePool:
+    """Rebind scores while reusing exactly the same candidates and structure features."""
+    count = len(pool.candidates)
+    vectors = tuple(
+        np.asarray(values, dtype=float)
+        for values in (
+            front_candidate_scores,
+            back_candidate_scores,
+            number_candidate_scores,
+        )
+    )
+    if any(vector.shape != (count,) for vector in vectors):
+        raise ValueError("candidate score vectors must align with the candidate pool")
+    if any(
+        np.any(~np.isfinite(vector)) or np.any((vector < 0) | (vector > 1)) for vector in vectors
+    ):
+        raise ValueError("candidate score vectors must contain finite values in [0, 1]")
+    if number_score_weight < 0 or structure_score_weight < 0:
+        raise ValueError("number and structure score weights must be non-negative")
+    weight_total = number_score_weight + structure_score_weight
+    if weight_total <= 0:
+        raise ValueError("number and structure score weights must sum above zero")
+
+    front_values, back_values, number_values = vectors
+    combined_values = (
+        None
+        if combined_candidate_scores is None
+        else np.asarray(combined_candidate_scores, dtype=float)
+    )
+    if combined_values is not None and combined_values.shape != (count,):
+        raise ValueError("combined candidate score vector must align with the candidate pool")
+    if combined_values is not None and (
+        np.any(~np.isfinite(combined_values))
+        or np.any((combined_values < 0) | (combined_values > 1))
+    ):
+        raise ValueError("combined candidate scores must be finite values in [0, 1]")
+    rescored = tuple(
+        candidate.model_copy(
+            update={
+                "front_number_score": float(front_values[index]),
+                "back_number_score": float(back_values[index]),
+                "number_score": float(number_values[index]),
+                "combined_ticket_score": float(
+                    combined_values[index]
+                    if combined_values is not None
+                    else (
+                        number_score_weight * number_values[index]
+                        + structure_score_weight * candidate.structure_score
+                    )
+                    / weight_total
+                ),
+            }
+        )
+        for index, candidate in enumerate(pool.candidates)
+    )
+    return CandidatePool(
+        target_issue=pool.target_issue,
+        data_cutoff_issue=pool.data_cutoff_issue,
+        generated_at=pool.generated_at,
+        random_seed=pool.random_seed,
+        scorer_spec=scorer_spec,
+        generation_parameters={
+            **pool.generation_parameters,
+            "rescore_method": scoring_method,
+            "structure_features_reused": True,
+            "candidate_numbers_reused": True,
+            "number_score_weight": number_score_weight,
+            "structure_score_weight": structure_score_weight,
+        },
+        candidates=rescored,
+    )
+
+
+def rescore_candidate_pool(
+    history: pd.DataFrame,
+    pool: CandidatePool,
+    *,
+    scorer_spec: ScorerSpec,
+    front_number_weight: float = 5 / 7,
+    back_number_weight: float = 2 / 7,
+    number_score_weight: float = 0.5,
+    structure_score_weight: float = 0.5,
+) -> CandidatePool:
+    """Compute a new number objective without regenerating candidates or structures."""
+    validated = validate_draw_dataframe(history)
+    if str(validated.iloc[-1]["issue"]) != pool.data_cutoff_issue:
+        raise ValueError("rescoring history cutoff does not match the candidate pool")
+    if front_number_weight < 0 or back_number_weight < 0:
+        raise ValueError("front and back number weights must be non-negative")
+    area_total = front_number_weight + back_number_weight
+    if area_total <= 0:
+        raise ValueError("front and back number weights must sum above zero")
+    scorer = build_number_scorer(scorer_spec)
+    front_map = _normalize_scores(scorer(validated, area="front"), 35)
+    back_map = _normalize_scores(scorer(validated, area="back"), 12)
+    fronts = np.asarray([item.front_numbers for item in pool.candidates], dtype=np.int64)
+    backs = np.asarray([item.back_numbers for item in pool.candidates], dtype=np.int64)
+    front_values = np.asarray(
+        [[front_map[int(number)] for number in row] for row in fronts],
+        dtype=float,
+    ).mean(axis=1)
+    back_values = np.asarray(
+        [[back_map[int(number)] for number in row] for row in backs],
+        dtype=float,
+    ).mean(axis=1)
+    number_values = (
+        front_number_weight * front_values + back_number_weight * back_values
+    ) / area_total
+    return rescore_candidate_pool_with_vectors(
+        pool,
+        scorer_spec=scorer_spec,
+        front_candidate_scores=front_values,
+        back_candidate_scores=back_values,
+        number_candidate_scores=number_values,
+        number_score_weight=number_score_weight,
+        structure_score_weight=structure_score_weight,
+        scoring_method="vectorized_number_rescore_reusing_structure_features",
     )
 
 

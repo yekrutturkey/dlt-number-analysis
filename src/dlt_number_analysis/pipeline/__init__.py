@@ -12,6 +12,7 @@ from dlt_number_analysis.pipeline.audit import (
     collect_git_audit,
 )
 from dlt_number_analysis.pipeline.prediction import (
+    PROFILE_DEFAULTS,
     CandidatePoolSummary,
     PipelineConfig,
     PipelineProfile,
@@ -22,6 +23,7 @@ from dlt_number_analysis.pipeline.prediction import (
 )
 
 __all__ = [
+    "PROFILE_DEFAULTS",
     "CandidatePoolSummary",
     "GitAudit",
     "HistoryAudit",

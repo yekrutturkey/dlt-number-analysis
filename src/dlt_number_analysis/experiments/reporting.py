@@ -14,8 +14,11 @@ from dlt_number_analysis.experiments.benchmark import (
     RuntimeBenchmarkRecord,
     choose_default_parallel_workers,
 )
+from dlt_number_analysis.experiments.scheduler import ProcessSchedulerReport
 from dlt_number_analysis.experiments.statistics import (
     METRIC_SOURCE_COLUMNS,
+    adjust_p_values_benjamini_hochberg,
+    adjust_p_values_holm,
     paired_bootstrap_95_interval,
     paired_metric_differences,
     paired_permutation_test,
@@ -36,8 +39,15 @@ class ExperimentComparison(BaseModel):
     bootstrap_95_lower: float
     bootstrap_95_upper: float
     permutation_p_value: float = Field(ge=0, le=1)
+    holm_adjusted_p_value: float = Field(default=1.0, ge=0, le=1)
+    benjamini_hochberg_adjusted_p_value: float = Field(default=1.0, ge=0, le=1)
+    holm_significant_advantage: bool = False
+    benjamini_hochberg_significant_advantage: bool = False
     statistically_significant_advantage: bool
-    inference_method: str = "paired bootstrap plus paired sign-flip permutation test"
+    inference_method: str = (
+        "paired bootstrap plus paired sign-flip permutation test with Holm and "
+        "Benjamini-Hochberg corrections"
+    )
 
 
 def summarize_observations(observations: pd.DataFrame) -> pd.DataFrame:
@@ -82,8 +92,11 @@ def compare_to_constraint_matched_baseline(
     bootstrap_resamples: int = 2000,
     permutations: int = 5000,
     random_seed: int = 20260714,
+    minimum_paired_observations: int = 30,
 ) -> tuple[ExperimentComparison, ...]:
     """Compare on paired target/seed rows; never infer from independent CI overlap."""
+    if minimum_paired_observations < 2:
+        raise ValueError("minimum_paired_observations must be at least 2")
     comparisons: list[ExperimentComparison] = []
     if observations.empty:
         return ()
@@ -100,7 +113,7 @@ def compare_to_constraint_matched_baseline(
                     differences["metric"] == metric,
                     "difference",
                 ].to_numpy(dtype=float)
-                if values.size == 0:
+                if values.size < minimum_paired_observations:
                     continue
                 interval = paired_bootstrap_95_interval(
                     values,
@@ -123,12 +136,31 @@ def compare_to_constraint_matched_baseline(
                         bootstrap_95_lower=interval.lower,
                         bootstrap_95_upper=interval.upper,
                         permutation_p_value=test.p_value,
-                        statistically_significant_advantage=(
-                            interval.lower > 0 and test.p_value < 0.05
-                        ),
+                        statistically_significant_advantage=False,
                     )
                 )
-    return tuple(comparisons)
+    corrected: list[ExperimentComparison] = []
+    for phase in sorted({comparison.phase for comparison in comparisons}):
+        family = [comparison for comparison in comparisons if comparison.phase == phase]
+        p_values = [comparison.permutation_p_value for comparison in family]
+        holm = adjust_p_values_holm(p_values)
+        benjamini = adjust_p_values_benjamini_hochberg(p_values)
+        for comparison, holm_p, benjamini_p in zip(family, holm, benjamini, strict=True):
+            positive = comparison.bootstrap_95_lower > 0
+            holm_advantage = positive and holm_p < 0.05
+            benjamini_advantage = positive and benjamini_p < 0.05
+            corrected.append(
+                comparison.model_copy(
+                    update={
+                        "holm_adjusted_p_value": holm_p,
+                        "benjamini_hochberg_adjusted_p_value": benjamini_p,
+                        "holm_significant_advantage": holm_advantage,
+                        "benjamini_hochberg_significant_advantage": benjamini_advantage,
+                        "statistically_significant_advantage": holm_advantage,
+                    }
+                )
+            )
+    return tuple(corrected)
 
 
 def _write_text(path: str | Path, text: str) -> Path:
@@ -236,13 +268,14 @@ def write_experiment_summary_report(
                 "",
                 (
                     "结论仅依据配对 bootstrap 与配对置换检验；"
-                    "没有使用两个独立置信区间是否重叠来判断优势。"
+                    "没有使用两个独立置信区间是否重叠来判断优势；"
+                    "正式显著性结论采用更保守的 Holm 校正。"
                 ),
                 f"显著优势条目数：{len(significant)}。",
             ]
         )
     else:
-        lines.append("缺少同一期次、同一种子的 B1 配对结果，暂不能进行统计比较。")
+        lines.append("缺少至少 30 个同一期次、同一种子的 B1 配对结果，暂不能进行统计比较。")
     lines.extend(["", f"> {DISCLAIMER}"])
     return _write_text(path, "\n".join(lines))
 
@@ -325,5 +358,60 @@ def write_runtime_benchmark_report(
                 "只有 4 线程在每次配对测量中均达到稳定加速时，才会建议改为 4。",
             ]
         )
+    lines.extend(["", f"> {DISCLAIMER}"])
+    return _write_text(path, "\n".join(lines))
+
+
+def write_experiment_runtime_report(
+    reports: Sequence[ProcessSchedulerReport],
+    path: str | Path,
+) -> Path:
+    """Aggregate shared-bank cache, process, CPU, wall time, and failure metrics."""
+    rows: list[dict[str, object]] = []
+    for report in reports:
+        for completed in report.completed_tasks:
+            executions = completed.result.get("executions", [])
+            if not isinstance(executions, list):
+                continue
+            for execution in executions:
+                if not isinstance(execution, dict):
+                    continue
+                rows.append(
+                    {
+                        "task_id": completed.task_id,
+                        "experiment_id": execution.get("experiment_id"),
+                        "phase": execution.get("phase"),
+                        "seed": execution.get("seed"),
+                        "period_count": execution.get("period_count"),
+                        "candidate_cache_hit_rate": execution.get("candidate_cache_hit_rate"),
+                        "feasible_bank_generation_seconds": execution.get(
+                            "feasible_bank_generation_seconds"
+                        ),
+                        "portfolio_bank_reuse_count": execution.get("portfolio_bank_reuse_count"),
+                        "experiment_throughput_per_hour": execution.get(
+                            "experiment_throughput_per_hour"
+                        ),
+                        "estimated_remaining_runtime_seconds": execution.get(
+                            "estimated_remaining_runtime_seconds"
+                        ),
+                        "process_count": report.process_count,
+                        "hostname": report.hostname,
+                        "started_at": report.started_at,
+                        "ended_at": report.ended_at,
+                        "total_cpu_time_seconds": execution.get("total_cpu_time_seconds"),
+                        "wall_clock_seconds": execution.get("wall_clock_seconds"),
+                        "failed_task_count": len(report.failed_tasks),
+                    }
+                )
+    lines = [
+        "# v0.5.1 实验计算性能",
+        "",
+        "该报告来自追加保存的 ProcessPool 运行元数据；未执行的任务不会生成虚构指标。",
+        "",
+    ]
+    if rows:
+        lines.append(_markdown_table(pd.DataFrame.from_records(rows)))
+    else:
+        lines.append("尚无已完成的 v0.5.1 ProcessPool 实验任务。")
     lines.extend(["", f"> {DISCLAIMER}"])
     return _write_text(path, "\n".join(lines))

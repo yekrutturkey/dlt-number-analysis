@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from dlt_number_analysis.experiments import (
+    adjust_p_values_benjamini_hochberg,
+    adjust_p_values_holm,
     paired_bootstrap_95_interval,
     paired_metric_differences,
     paired_permutation_test,
@@ -13,6 +16,16 @@ from dlt_number_analysis.experiments import (
     performance_by_seed,
     performance_by_year,
 )
+
+
+def test_holm_and_benjamini_hochberg_corrections_are_monotone() -> None:
+    p_values = (0.01, 0.04, 0.03, 0.002)
+
+    holm = adjust_p_values_holm(p_values)
+    benjamini = adjust_p_values_benjamini_hochberg(p_values)
+
+    np.testing.assert_allclose(holm, (0.03, 0.06, 0.06, 0.008))
+    np.testing.assert_allclose(benjamini, (0.02, 0.04, 0.04, 0.008))
 
 
 def _results(offset: int, experiment_id: str) -> pd.DataFrame:

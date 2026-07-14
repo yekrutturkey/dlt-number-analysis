@@ -23,6 +23,14 @@ from dlt_number_analysis.data.history_store import (
     reconcile_sources,
 )
 from dlt_number_analysis.data.identity import canonical_history_bytes, canonical_history_sha256
+from dlt_number_analysis.data.integrity_audit import (
+    draw_date_anomaly_report,
+    generate_history_integrity_report,
+    source_page_duplicate_check,
+    source_record_count_check,
+    verified_history_prefix_check,
+    yearly_issue_gap_report,
+)
 from dlt_number_analysis.data.source_import import (
     ConflictResolutionRecord,
     SourceFetcher,
@@ -58,7 +66,9 @@ __all__ = [
     "assert_backtest_ready",
     "canonical_history_bytes",
     "canonical_history_sha256",
+    "draw_date_anomaly_report",
     "generate_data_quality_report",
+    "generate_history_integrity_report",
     "load_draws_csv",
     "load_issue_prizes",
     "load_prize_rule_schedule",
@@ -68,9 +78,13 @@ __all__ = [
     "reconcile_draw_sources",
     "reconcile_sources",
     "resolve_conflict_record",
+    "source_page_duplicate_check",
+    "source_record_count_check",
     "validate_draw_dataframe",
+    "verified_history_prefix_check",
     "verified_manifest_path",
     "write_source_snapshot",
     "write_validated_draws_csv",
     "write_verified_history",
+    "yearly_issue_gap_report",
 ]

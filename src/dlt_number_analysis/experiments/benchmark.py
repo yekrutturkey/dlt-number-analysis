@@ -6,7 +6,7 @@ import tracemalloc
 from collections.abc import Sequence
 from datetime import datetime
 from statistics import median
-from time import perf_counter
+from time import perf_counter, process_time
 from typing import Literal
 
 import pandas as pd
@@ -35,6 +35,14 @@ class RuntimeBenchmarkRecord(BaseModel):
     candidate_scoring_seconds: float = Field(ge=0)
     portfolio_search_seconds: float = Field(ge=0)
     feasible_portfolios_evaluated: int = Field(ge=0)
+    candidate_cache_hit_rate: float = Field(default=0.0, ge=0, le=1)
+    feasible_bank_generation_seconds: float = Field(default=0.0, ge=0)
+    portfolio_bank_reuse_count: int = Field(default=0, ge=0)
+    experiment_throughput_per_hour: float = Field(default=0.0, ge=0)
+    estimated_remaining_runtime_seconds: float = Field(default=0.0, ge=0)
+    process_count: int = Field(default=1, ge=1)
+    total_cpu_time_seconds: float = Field(default=0.0, ge=0)
+    wall_clock_seconds: float = Field(default=0.0, ge=0)
     memory_method: str = "tracemalloc_python_allocations"
 
 
@@ -65,6 +73,7 @@ def benchmark_pipeline_profiles(
                     tracemalloc.start()
                 tracemalloc.reset_peak()
                 started = perf_counter()
+                cpu_started = process_time()
                 result = PredictionPipeline(config).run(
                     history,
                     target_issue=target_issue,
@@ -72,6 +81,7 @@ def benchmark_pipeline_profiles(
                     random_seeds=PipelineSeeds.from_base_seed(random_seed),
                 )
                 runtime_seconds = perf_counter() - started
+                cpu_seconds = process_time() - cpu_started
                 _, peak_bytes = tracemalloc.get_traced_memory()
                 if not was_tracing:
                     tracemalloc.stop()
@@ -94,6 +104,12 @@ def benchmark_pipeline_profiles(
                         feasible_portfolios_evaluated=int(
                             optimizer["feasible_portfolios_evaluated"]
                         ),
+                        experiment_throughput_per_hour=(
+                            0.0 if runtime_seconds == 0 else 3600 / runtime_seconds
+                        ),
+                        process_count=1,
+                        total_cpu_time_seconds=cpu_seconds,
+                        wall_clock_seconds=runtime_seconds,
                     )
                 )
     return tuple(records)

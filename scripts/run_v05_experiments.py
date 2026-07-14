@@ -22,7 +22,7 @@ from dlt_number_analysis.experiments import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def build_parser() -> argparse.ArgumentParser:
+def _legacy_build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--draws",
@@ -95,8 +95,8 @@ def _pending_ablation_rows() -> pd.DataFrame:
     return pd.DataFrame.from_records(records)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def _legacy_main(argv: list[str] | None = None) -> int:
+    args = _legacy_build_parser().parse_args(argv)
     specifications = baseline_experiment_specs(seeds=(args.seed,), phase=args.phase)
     selected = tuple(spec for spec in specifications if spec.experiment_id in args.experiment_ids)
     missing = set(args.experiment_ids).difference(spec.experiment_id for spec in selected)
@@ -155,6 +155,13 @@ def main(argv: list[str] | None = None) -> int:
             )
     print(DISCLAIMER)
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Delegate to v0.5.1 partitioned, resumable, ProcessPool execution."""
+    from dlt_number_analysis.experiments.command import main as run_partitioned
+
+    return run_partitioned(argv)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,45 @@
+{
+  "process_count": 1,
+  "hostname": "x7ny8",
+  "platform": "Windows-11-10.0.26100-SP0",
+  "python_version": "3.13.3",
+  "started_at": "2026-07-14T10:37:43.257181Z",
+  "ended_at": "2026-07-14T10:37:50.565355Z",
+  "wall_clock_seconds": 7.308163099980447,
+  "total_cpu_time_seconds": 4.875,
+  "experiment_throughput_per_hour": 492.59984359265763,
+  "estimated_remaining_runtime_seconds": 0.0,
+  "completed_tasks": [
+    {
+      "task_id": "targets-08008-08008-seed-20260000",
+      "result": {
+        "task_id": "targets-08008-08008-seed-20260000",
+        "deterministic_subseed": 961370953,
+        "observations_json": "[{\"experiment_id\":\"B1\",\"experiment_version\":\"v0.5.1-b1-shared-bank-v1\",\"experiment_config_sha256\":\"a0a2097db4987d6debe998ddbfd5eaf47dd2648f31243dd6a7d7cc8d9294e1ee\",\"phase\":\"development\",\"seed\":20260000,\"prediction_random_seed\":1573283969,\"draw_date\":\"2008-01-19T00:00:00.000\",\"scorer_name\":\"uniform_score\",\"portfolio_strategy\":\"constraint_matched_random\",\"candidate_generation_method\":\"seeded_uniform_candidate_pool\",\"window\":null,\"decay\":null,\"hot_window\":null,\"cold_window\":null,\"hot_weight\":null,\"number_score_weight\":1.0,\"structure_score_weight\":0.0,\"target_front_pool_size\":18,\"core_number_count\":2,\"candidate_seed\":1019589419,\"selection_seed\":1573283969,\"bank_seed\":655263634,\"bank_size\":1191,\"bank_acceptance_rate\":0.2382,\"bank_hash\":\"67e5b9f539856971ea290d69c09df695412def4c0c99b708a6b1b2c215229713\",\"candidate_numbers_hash\":\"d6daee21d8a3f2f97cd9da792eb781614b42e9b7f3b2bdc743d7bda9e19c1c87\",\"constraints_signature\":\"bb47f959729478e89bc0414745ad15db1b74ebbbd90f8d3944febbde24d49ef1\",\"target_issue\":\"08008\",\"data_cutoff_issue\":\"08007\",\"strategy_name\":\"experiment_B1\",\"random_seed\":20270000,\"best_front_hits\":1,\"best_back_hits\":1,\"best_total_hits\":2,\"at_least_three_front\":false,\"at_least_2_plus_1\":false,\"ticket_hit_share\":0.3333333333,\"unique_hit_concentration\":0.5,\"any_prize\":null,\"front_pool_coverage\":2,\"back_pool_coverage\":2,\"total_cost\":\"10\",\"total_prize\":null,\"roi\":null,\"prize_rule_version\":null,\"prize_data_available\":false,\"random_baseline_seed_count\":1000,\"random_metric_percentiles\":{\"best_front_hits\":25.45,\"best_back_hits\":53.25,\"best_total_hits\":45.85,\"at_least_three_front\":46.6,\"at_least_2_plus_1\":39.95,\"front_pool_coverage\":27.7,\"back_pool_coverage\":83.1,\"unique_hit_concentration\":40.4}}]",
+        "executions": [
+          {
+            "experiment_id": "B1",
+            "experiment_version": "v0.5.1-b1-shared-bank-v1",
+            "experiment_config_sha256": "a0a2097db4987d6debe998ddbfd5eaf47dd2648f31243dd6a7d7cc8d9294e1ee",
+            "phase": "development",
+            "seed": 20260000,
+            "period_count": 1,
+            "runtime_seconds": 4.006086400011554,
+            "candidate_cache_hit_rate": 0.0,
+            "feasible_bank_generation_seconds": 0.8164771999581717,
+            "portfolio_bank_reuse_count": 0,
+            "experiment_throughput_per_hour": 898.6326405715106,
+            "estimated_remaining_runtime_seconds": 0.0,
+            "process_count": 1,
+            "total_cpu_time_seconds": 3.9375,
+            "wall_clock_seconds": 4.006086400011554
+          }
+        ],
+        "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。"
+      },
+      "cpu_seconds": 4.875
+    }
+  ],
+  "failed_tasks": [],
+  "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。"
+}

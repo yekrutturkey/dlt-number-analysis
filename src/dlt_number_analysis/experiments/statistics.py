@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from math import isfinite
 from typing import Self
 
 import numpy as np
@@ -165,6 +166,46 @@ def paired_permutation_test(
         observed_mean_difference=observed,
         p_value=(extreme + 1) / (permutations + 1),
     )
+
+
+def _validated_p_values(p_values: Sequence[float]) -> list[float]:
+    values = [float(value) for value in p_values]
+    if any(not isfinite(value) or not 0 <= value <= 1 for value in values):
+        raise ValueError("p-values must be finite values in [0, 1]")
+    return values
+
+
+def adjust_p_values_holm(p_values: Sequence[float]) -> tuple[float, ...]:
+    """Apply Holm's family-wise error correction with monotone adjusted values."""
+    values = _validated_p_values(p_values)
+    count = len(values)
+    if count == 0:
+        return ()
+    order = sorted(range(count), key=values.__getitem__)
+    adjusted = [0.0] * count
+    running = 0.0
+    for rank, index in enumerate(order):
+        running = max(running, (count - rank) * values[index])
+        adjusted[index] = min(running, 1.0)
+    return tuple(adjusted)
+
+
+def adjust_p_values_benjamini_hochberg(
+    p_values: Sequence[float],
+) -> tuple[float, ...]:
+    """Apply Benjamini-Hochberg false-discovery-rate correction."""
+    values = _validated_p_values(p_values)
+    count = len(values)
+    if count == 0:
+        return ()
+    order = sorted(range(count), key=values.__getitem__)
+    adjusted = [0.0] * count
+    running = 1.0
+    for rank in range(count, 0, -1):
+        index = order[rank - 1]
+        running = min(running, values[index] * count / rank)
+        adjusted[index] = min(running, 1.0)
+    return tuple(adjusted)
 
 
 def _aggregate_performance(results: pd.DataFrame, group_columns: list[str]) -> pd.DataFrame:

@@ -142,3 +142,21 @@ def test_verified_history_manifest_detects_later_modification(tmp_path: Path) ->
 def test_reconciliation_rejects_one_source() -> None:
     with pytest.raises(ValueError, match="two independent"):
         reconcile_draw_sources([_official_snapshot()])
+
+
+def test_missing_issue_in_one_source_blocks_verified_reconciliation() -> None:
+    payload = json.loads(_official_snapshot().content)
+    payload["value"]["list"] = payload["value"]["list"][:1]
+    incomplete = SourceSnapshot.from_content(
+        source_name="china_sports_lottery_official",
+        source_url="https://example.test/official",
+        source_format="sporttery_json",
+        content=json.dumps(payload).encode(),
+        fetched_at=FETCHED_AT,
+    )
+
+    result = reconcile_draw_sources([incomplete, _five_hundred_snapshot()])
+
+    assert result.reconciled_draws is None
+    assert result.report.blocks_backtest is True
+    assert any(finding.code == "source_record_count_mismatch" for finding in result.report.findings)

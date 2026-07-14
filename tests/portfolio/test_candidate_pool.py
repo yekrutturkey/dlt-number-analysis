@@ -16,9 +16,13 @@ from dlt_number_analysis.portfolio import (
     CandidatePool,
     PortfolioConstraints,
     PortfolioSelection,
+    build_feasible_portfolio_bank,
+    candidate_numbers_hash,
     generate_candidate_pool,
     load_candidate_score_details,
     optimize_portfolio,
+    sample_constraint_matched_portfolio,
+    score_portfolio_bank,
     write_candidate_score_details,
 )
 from dlt_number_analysis.scoring import ScorerSpec, recency_weighted_frequency_score
@@ -308,3 +312,63 @@ def test_hard_constraint_rejects_wrong_ticket_count(
 def test_constraint_model_rejects_budget_mismatch() -> None:
     with pytest.raises(ValidationError, match="total budget"):
         PortfolioConstraints(total_budget=12)
+
+
+def test_constraint_matched_bank_sampling_ignores_candidate_id_order(
+    candidate_pool: CandidatePool,
+) -> None:
+    bank = build_feasible_portfolio_bank(
+        candidate_pool,
+        bank_seed=5101,
+        search_trials=4_000,
+        maximum_bank_size=250,
+    )
+    reversed_candidates = tuple(
+        candidate.model_copy(update={"candidate_id": f"reordered-{index:05d}"})
+        for index, candidate in enumerate(reversed(candidate_pool.candidates), start=1)
+    )
+    reordered = CandidatePool.model_validate(
+        candidate_pool.model_copy(update={"candidates": reversed_candidates}).model_dump()
+    )
+
+    assert candidate_numbers_hash(reordered) == bank.candidate_numbers_hash
+    original_distribution = [
+        tuple(
+            (ticket.front_numbers, ticket.back_numbers)
+            for ticket in sample_constraint_matched_portfolio(
+                candidate_pool, bank, random_seed=seed
+            ).tickets
+        )
+        for seed in range(30)
+    ]
+    reordered_distribution = [
+        tuple(
+            (ticket.front_numbers, ticket.back_numbers)
+            for ticket in sample_constraint_matched_portfolio(
+                reordered, bank, random_seed=seed
+            ).tickets
+        )
+        for seed in range(30)
+    ]
+
+    assert original_distribution == reordered_distribution
+    assert bank.bank_size > 0
+    assert bank.acceptance_rate > 0
+    assert bank.bank_hash
+
+
+def test_optimized_selection_scores_the_same_feasible_bank(
+    candidate_pool: CandidatePool,
+) -> None:
+    bank = build_feasible_portfolio_bank(
+        candidate_pool,
+        bank_seed=5102,
+        search_trials=3_000,
+        maximum_bank_size=100,
+    )
+
+    scored = score_portfolio_bank(candidate_pool, bank, random_seed=88)
+
+    assert scored.evaluated_portfolios == bank.bank_size
+    assert scored.bank_hash == bank.bank_hash
+    assert scored.selection.optimizer_parameters["bank_hash"] == bank.bank_hash

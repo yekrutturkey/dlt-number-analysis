@@ -20,6 +20,7 @@ from dlt_number_analysis.data import (
     load_issue_prizes,
     load_prize_rule_schedule,
     load_verified_history,
+    verified_history_prefix_check,
 )
 from dlt_number_analysis.evaluation import apply_issue_prize_record, evaluate_prediction
 from dlt_number_analysis.models import PredictionRecord, load_prediction_record
@@ -29,7 +30,6 @@ from dlt_number_analysis.pipeline import (
     PipelineSeeds,
     PredictionPipeline,
     build_history_audit,
-    canonical_history_sha256,
     collect_git_audit,
     load_next_prediction_artifact,
 )
@@ -203,13 +203,13 @@ def _load_prediction_input(path: Path, draws: pd.DataFrame) -> PredictionRecord:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, dict) and "prediction" in payload:
         artifact = load_next_prediction_artifact(path)
-        cutoff_matches = draws.index[
-            draws["issue"].astype(str) == artifact.data_cutoff_issue
-        ].tolist()
-        if len(cutoff_matches) != 1:
-            raise ValueError("current history does not contain the artifact cutoff issue")
-        prefix = draws.iloc[: cutoff_matches[0] + 1].copy()
-        if canonical_history_sha256(prefix) != artifact.canonical_history_sha256:
+        findings = verified_history_prefix_check(
+            draws,
+            cutoff_issue=artifact.data_cutoff_issue,
+            expected_canonical_sha256=artifact.canonical_history_sha256,
+            expected_record_count=artifact.history_record_count,
+        )
+        if findings:
             raise ValueError("history was modified before the artifact data cutoff")
         return artifact.prediction
     return load_prediction_record(path)

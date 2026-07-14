@@ -21,10 +21,18 @@ from dlt_number_analysis.data.data_validator import (
     write_validated_draws_csv,
 )
 from dlt_number_analysis.data.history_store import (
+    DataQualityReport,
     SourceReconciliationResult,
     reconcile_sources,
 )
 from dlt_number_analysis.data.identity import canonical_history_sha256
+from dlt_number_analysis.data.integrity_audit import (
+    draw_date_anomaly_report,
+    generate_history_integrity_report,
+    source_page_duplicate_check,
+    source_record_count_check,
+    yearly_issue_gap_report,
+)
 
 SourceFormat = Literal["sporttery_json", "sporttery_json_pages", "five_hundred_html"]
 
@@ -317,8 +325,30 @@ def reconcile_draw_sources(snapshots: Sequence[SourceSnapshot]) -> SourceReconci
         raise ValueError("at least two independent named source snapshots are required")
     if len({snapshot.source_name for snapshot in snapshots}) != len(snapshots):
         raise ValueError("one snapshot per source is required for reconciliation")
-    return reconcile_sources(
-        {snapshot.source_name: normalize_source_draws(snapshot) for snapshot in snapshots}
+    normalized = {snapshot.source_name: normalize_source_draws(snapshot) for snapshot in snapshots}
+    reconciliation = reconcile_sources(normalized)
+    extra_findings = [
+        *source_record_count_check(normalized),
+        *(finding for snapshot in snapshots for finding in source_page_duplicate_check(snapshot)),
+    ]
+    if reconciliation.reconciled_draws is not None:
+        extra_findings.extend(yearly_issue_gap_report(reconciliation.reconciled_draws))
+        extra_findings.extend(draw_date_anomaly_report(reconciliation.reconciled_draws))
+    findings = (*reconciliation.report.findings, *extra_findings)
+    has_errors = any(finding.severity == "error" for finding in findings)
+    report = DataQualityReport(
+        record_count=reconciliation.report.record_count,
+        data_start_issue=reconciliation.report.data_start_issue,
+        data_cutoff_issue=reconciliation.report.data_cutoff_issue,
+        source_names=reconciliation.report.source_names,
+        findings=findings,
+        conflict_count=reconciliation.report.conflict_count,
+        is_valid=not has_errors,
+        blocks_backtest=has_errors,
+    )
+    return SourceReconciliationResult(
+        reconciled_draws=None if has_errors else reconciliation.reconciled_draws,
+        report=report,
     )
 
 
@@ -407,4 +437,7 @@ def load_verified_history(path: str | Path) -> pd.DataFrame:
         raise ValueError("verified history cutoff issue no longer matches its manifest")
     if canonical_history_sha256(draws) != manifest.canonical_history_sha256:
         raise ValueError("verified history was modified after reconciliation")
+    integrity = generate_history_integrity_report(draws, source_names=manifest.source_names)
+    if integrity.blocks_backtest:
+        raise ValueError("verified history failed formal timeline integrity audit")
     return draws

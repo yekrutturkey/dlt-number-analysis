@@ -146,7 +146,7 @@ def _assign_roles(
     )
 
 
-def _score_portfolio(
+def score_portfolio_tickets(
     tickets: tuple[PortfolioTicket, ...],
     core_numbers: tuple[int, ...],
     support_numbers: tuple[int, ...],
@@ -311,7 +311,7 @@ def optimize_portfolio(
         tickets = _assign_roles(selected_tuple, core_numbers, active_constraints)
         if tickets is None:
             continue
-        scores = _score_portfolio(
+        scores = score_portfolio_tickets(
             tickets,
             core_numbers,
             support_numbers,

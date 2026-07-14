@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -9,10 +10,13 @@ import pandas as pd
 from dlt_number_analysis import DISCLAIMER
 from dlt_number_analysis.data import DataQualityReport
 from dlt_number_analysis.experiments import (
+    CompletedExperimentTask,
+    ProcessSchedulerReport,
     RuntimeBenchmarkRecord,
     compare_to_constraint_matched_baseline,
     write_ablation_results_csv,
     write_data_quality_report,
+    write_experiment_runtime_report,
     write_experiment_summary_report,
     write_holdout_results_report,
     write_runtime_benchmark_report,
@@ -49,6 +53,7 @@ def test_all_required_report_types_include_phase_or_risk_context(tmp_path: Path)
         observations,
         bootstrap_resamples=100,
         permutations=1000,
+        minimum_paired_observations=2,
     )
     quality = DataQualityReport(
         record_count=2,
@@ -71,6 +76,42 @@ def test_all_required_report_types_include_phase_or_risk_context(tmp_path: Path)
         portfolio_search_seconds=0.5,
         feasible_portfolios_evaluated=20,
     )
+    scheduler = ProcessSchedulerReport(
+        process_count=1,
+        hostname="test-host",
+        platform="test-platform",
+        python_version="3.13",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ended_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        wall_clock_seconds=1,
+        total_cpu_time_seconds=0.5,
+        experiment_throughput_per_hour=3600,
+        estimated_remaining_runtime_seconds=0,
+        completed_tasks=(
+            CompletedExperimentTask(
+                task_id="one",
+                result={
+                    "executions": [
+                        {
+                            "experiment_id": "B1",
+                            "phase": "development",
+                            "seed": 1,
+                            "period_count": 1,
+                            "candidate_cache_hit_rate": 0,
+                            "feasible_bank_generation_seconds": 0.2,
+                            "portfolio_bank_reuse_count": 0,
+                            "experiment_throughput_per_hour": 3600,
+                            "estimated_remaining_runtime_seconds": 0,
+                            "total_cpu_time_seconds": 0.5,
+                            "wall_clock_seconds": 1,
+                        }
+                    ]
+                },
+                cpu_seconds=0.5,
+            ),
+        ),
+        failed_tasks=(),
+    )
 
     paths = (
         write_data_quality_report(quality, None, tmp_path / "data_quality.md"),
@@ -79,6 +120,7 @@ def test_all_required_report_types_include_phase_or_risk_context(tmp_path: Path)
         ),
         write_holdout_results_report(observations, tmp_path / "holdout_results.md"),
         write_runtime_benchmark_report((benchmark,), tmp_path / "runtime_benchmark.md"),
+        write_experiment_runtime_report((scheduler,), tmp_path / "experiment_runtime.md"),
     )
     ablation = write_ablation_results_csv(observations.iloc[:1], tmp_path / "ablation_results.csv")
 
@@ -89,4 +131,8 @@ def test_all_required_report_types_include_phase_or_risk_context(tmp_path: Path)
     assert "校准" in summary
     assert "最终留出" in summary
     assert "配对置换检验" in summary
-    assert any(item.statistically_significant_advantage for item in comparisons)
+    assert all(item.holm_adjusted_p_value >= item.permutation_p_value for item in comparisons)
+    assert all(
+        item.statistically_significant_advantage == item.holm_significant_advantage
+        for item in comparisons
+    )

@@ -110,9 +110,14 @@ def baseline_experiment_specs(
         strategy: PortfolioStrategy,
         method: CandidateGenerationMethod = "seeded_uniform_candidate_pool",
     ) -> ExperimentSpec:
+        bank_version = experiment_id in {f"B{index}" for index in range(1, 7)}
         return ExperimentSpec(
             experiment_id=experiment_id,
-            experiment_version=f"v0.5-{experiment_id.lower()}-v1",
+            experiment_version=(
+                f"v0.5.1-{experiment_id.lower()}-shared-bank-v1"
+                if bank_version
+                else f"v0.5-{experiment_id.lower()}-v1"
+            ),
             scorer_spec=scorer,
             structure_score_weight=1.0 - number_weight,
             number_score_weight=number_weight,
@@ -160,7 +165,7 @@ def ablation_experiment_specs(
         specifications.append(
             ExperimentSpec(
                 experiment_id=identifier,
-                experiment_version="v0.5-ablation-v1",
+                experiment_version="v0.5.1-ablation-shared-v1",
                 scorer_spec=ScorerSpec(
                     name="recency_weighted_frequency_score",
                     parameters={"window": window, "decay": decay},
