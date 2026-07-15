@@ -19,7 +19,6 @@ from dlt_number_analysis.experiments.shared_computation import (
     SharedComputationCache,
     build_shared_ablation_context,
     deterministic_subseed,
-    materialize_ablation_candidate_pool,
 )
 from dlt_number_analysis.experiments.specs import ExperimentSpec
 from dlt_number_analysis.experiments.splits import (
@@ -32,11 +31,20 @@ from dlt_number_analysis.models import PredictionRecord
 from dlt_number_analysis.pipeline import PROFILE_DEFAULTS, PipelineConfig, PipelineProfile
 from dlt_number_analysis.portfolio import (
     CandidatePool,
+    CandidateScoreView,
     FeasiblePortfolioBank,
+    FeasiblePortfolioIndexBank,
+    PortfolioScoringMethod,
+    build_candidate_score_view,
+    candidate_pool_to_array_bundle,
+    candidate_score_view_from_arrays,
+    feasible_portfolio_bank_to_index_bank,
     portfolio_constraints_signature,
     rescore_candidate_pool,
+    rescore_candidate_pool_with_vectors,
     sample_constraint_matched_portfolio,
     score_portfolio_bank,
+    score_portfolio_bank_vectorized,
 )
 from dlt_number_analysis.scoring import build_number_scorer, uniform_score
 from dlt_number_analysis.strategies import StrategyFunction, core_rotation, max_coverage
@@ -62,6 +70,10 @@ class ExperimentExecutionRecord(BaseModel):
     process_count: int = Field(default=1, ge=1)
     total_cpu_time_seconds: float = Field(default=0.0, ge=0)
     wall_clock_seconds: float = Field(default=0.0, ge=0)
+    candidate_array_conversion_seconds: float = Field(default=0.0, ge=0)
+    portfolio_index_bank_seconds: float = Field(default=0.0, ge=0)
+    vectorized_scoring_seconds: float = Field(default=0.0, ge=0)
+    final_object_construction_seconds: float = Field(default=0.0, ge=0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +153,22 @@ def _historical_generation_time(draw_date: object) -> datetime:
     return datetime.combine(value, time(23, 59), tzinfo=ZoneInfo("Asia/Shanghai"))
 
 
+def _target_cohort_id(phase: str, target_issues: Sequence[str]) -> str:
+    """Name an exact target range without merging it with a different cohort."""
+    targets = tuple(str(issue) for issue in target_issues)
+    if targets == tuple(f"{issue:05d}" for issue in range(8009, 8109)):
+        return "v051_paired_smoke_100"
+    if targets == ("08008",):
+        return "single_correctness_smoke"
+    if phase == "calibration":
+        return "calibration"
+    if phase == "final_holdout":
+        return "final_holdout"
+    if not targets:
+        raise ValueError("experiment cohort cannot be empty")
+    return f"{phase}_{targets[0]}_{targets[-1]}_{len(targets)}"
+
+
 def _prediction_strategy(prediction: PredictionRecord) -> StrategyFunction:
     def strategy(**_: object) -> PredictionRecord:
         return prediction
@@ -163,6 +191,7 @@ def _shared_bank_experiment_batch(
     target_issues: Sequence[str] | None = None,
     minimum_bank_size: int = 500,
     maximum_bank_search_trials: int = 80_000,
+    portfolio_scoring_method: PortfolioScoringMethod = "numpy_vectorized",
 ) -> ExperimentBatchResult:
     """Run B1-B6 target-first so candidates and feasible banks are truly shared."""
     del parallel_workers
@@ -201,6 +230,12 @@ def _shared_bank_experiment_batch(
         missing = allowed_targets.difference(found)
         if missing:
             raise ValueError(f"requested targets are outside the declared phase: {sorted(missing)}")
+    target_issue_sequence = tuple(str(validated.iloc[index]["issue"]) for index in target_indices)
+    cohort_id = (
+        "development_full"
+        if allowed_targets is None and first.data_split.phase == "development"
+        else _target_cohort_id(first.data_split.phase, target_issue_sequence)
+    )
 
     profile_defaults = PROFILE_DEFAULTS[profile]
     objective = PipelineConfig(profile=profile)
@@ -215,6 +250,10 @@ def _shared_bank_experiment_batch(
         candidate_hits = 0
         bank_reuse_count = 0
         bank_generation_seconds = 0.0
+        candidate_array_conversion_seconds = 0.0
+        portfolio_index_bank_seconds = 0.0
+        vectorized_scoring_seconds = 0.0
+        final_object_construction_seconds = 0.0
         for target_index in target_indices:
             history = validated.iloc[:target_index].copy()
             target_issue = str(validated.iloc[target_index]["issue"])
@@ -253,8 +292,13 @@ def _shared_bank_experiment_batch(
                 candidate_requests += cache.candidate_requests
                 candidate_hits += cache.candidate_hits
                 base_pool = requested_pools[0]
+            array_started = perf_counter()
+            candidate_arrays = candidate_pool_to_array_bundle(base_pool)
+            candidate_array_conversion_seconds += perf_counter() - array_started
             rescored: dict[tuple[str, float, float], CandidatePool] = {}
+            score_views: dict[tuple[str, float, float], CandidateScoreView] = {}
             banks_by_signature: dict[str, FeasiblePortfolioBank] = {}
+            index_banks_by_signature: dict[str, FeasiblePortfolioIndexBank] = {}
             predictions: dict[str, PredictionRecord] = {}
             audit_by_strategy: dict[str, dict[str, object]] = {}
             target_bank_reuse_count = 0
@@ -281,12 +325,21 @@ def _shared_bank_experiment_batch(
                     banks_by_signature[signature] = bank
                     if ablation_context is None:
                         bank_generation_seconds += bank.generation_seconds
+                    index_started = perf_counter()
+                    index_banks_by_signature[signature] = feasible_portfolio_bank_to_index_bank(
+                        candidate_arrays, bank
+                    )
+                    portfolio_index_bank_seconds += perf_counter() - index_started
                 score_key = (
                     spec.scorer_spec.model_dump_json(),
                     spec.number_score_weight,
                     spec.structure_score_weight,
                 )
-                if score_key not in rescored:
+                if (
+                    spec.portfolio_strategy != "constraint_matched_random"
+                    and portfolio_scoring_method == "object_reference"
+                    and score_key not in rescored
+                ):
                     if ablation_context is None:
                         rescored[score_key] = rescore_candidate_pool(
                             history,
@@ -306,25 +359,93 @@ def _shared_bank_experiment_batch(
                         structure_index = ablation_context.score_cube.structure_weights.index(
                             spec.structure_score_weight
                         )
-                        rescored[score_key] = materialize_ablation_candidate_pool(
+                        structure_weight = ablation_context.score_cube.structure_weights[
+                            structure_index
+                        ]
+                        rescored[score_key] = rescore_candidate_pool_with_vectors(
                             base_pool,
-                            ablation_context.score_cube,
-                            scorer_index=scorer_index,
-                            structure_weight_index=structure_index,
+                            scorer_spec=ablation_context.score_cube.scorer_specs[scorer_index],
+                            front_candidate_scores=ablation_context.score_cube.front_candidate_scores[
+                                scorer_index
+                            ],
+                            back_candidate_scores=ablation_context.score_cube.back_candidate_scores[
+                                scorer_index
+                            ],
+                            number_candidate_scores=ablation_context.score_cube.number_scores[
+                                scorer_index
+                            ],
+                            combined_candidate_scores=ablation_context.score_cube.combined_scores[
+                                scorer_index, structure_index
+                            ],
+                            number_score_weight=1.0 - structure_weight,
+                            structure_score_weight=structure_weight,
+                            scoring_method="shared_15x4_numpy_ablation_score_cube",
                         )
-                scored_pool = rescored[score_key]
+                if (
+                    spec.portfolio_strategy != "constraint_matched_random"
+                    and portfolio_scoring_method == "numpy_vectorized"
+                    and score_key not in score_views
+                ):
+                    if ablation_context is None:
+                        score_views[score_key] = build_candidate_score_view(
+                            history,
+                            candidate_arrays,
+                            scorer_spec=spec.scorer_spec,
+                            number_score_weight=spec.number_score_weight,
+                            structure_score_weight=spec.structure_score_weight,
+                        )
+                    else:
+                        scorer_index = next(
+                            index
+                            for index, scorer_spec in enumerate(
+                                ablation_context.score_cube.scorer_specs
+                            )
+                            if scorer_spec == spec.scorer_spec
+                        )
+                        structure_index = ablation_context.score_cube.structure_weights.index(
+                            spec.structure_score_weight
+                        )
+                        score_views[score_key] = candidate_score_view_from_arrays(
+                            candidate_arrays,
+                            number_scores=ablation_context.score_cube.number_scores[scorer_index],
+                            combined_scores=ablation_context.score_cube.combined_scores[
+                                scorer_index, structure_index
+                            ],
+                            scorer_spec=spec.scorer_spec,
+                            number_score_weight=spec.number_score_weight,
+                            structure_score_weight=spec.structure_score_weight,
+                            scoring_method="shared_15x4_numpy_ablation_score_cube_view",
+                        )
                 selection_seed = deterministic_subseed(
                     seed, target_issue, spec.experiment_id, "selection"
                 )
                 if spec.portfolio_strategy == "constraint_matched_random":
                     selection = sample_constraint_matched_portfolio(
-                        scored_pool,
+                        base_pool,
                         bank,
                         random_seed=selection_seed,
                     )
+                    active_scoring_method = "random_bank_sample"
+                elif portfolio_scoring_method == "numpy_vectorized":
+                    vectorized_result = score_portfolio_bank_vectorized(
+                        score_views[score_key],
+                        index_banks_by_signature[signature],
+                        random_seed=selection_seed,
+                        single_ticket_weight=objective.single_ticket_weight,
+                        diversity_weight=objective.diversity_weight,
+                        core_weight=objective.core_weight,
+                        structure_weight=objective.structure_weight,
+                        repeat_penalty_weight=objective.repeat_penalty_weight,
+                    )
+                    selection = vectorized_result.selection
+                    vectorized_scoring_seconds += vectorized_result.vectorized_scoring_seconds
+                    final_object_construction_seconds += (
+                        vectorized_result.final_object_construction_seconds
+                    )
+                    active_scoring_method = "numpy_vectorized"
                 else:
                     selection = score_portfolio_bank(
-                        scored_pool,
+                        rescored[score_key],
                         bank,
                         random_seed=selection_seed,
                         single_ticket_weight=objective.single_ticket_weight,
@@ -333,18 +454,20 @@ def _shared_bank_experiment_batch(
                         structure_weight=objective.structure_weight,
                         repeat_penalty_weight=objective.repeat_penalty_weight,
                     ).selection
+                    active_scoring_method = "object_reference"
                 strategy_name = f"experiment_{spec.experiment_id}"
                 base_prediction = selection.to_prediction_record()
                 prediction = base_prediction.model_copy(
                     update={
                         "strategy_name": strategy_name,
-                        "model_version": "shared-feasible-bank-experiment-v0.5.1",
+                        "model_version": "shared-feasible-bank-experiment-v0.5.2",
                         "parameters": {
                             **base_prediction.parameters,
                             "experiment_config_sha256": config_hashes[spec.experiment_id],
                             "scorer_spec": spec.scorer_spec.model_dump(mode="json"),
                             "number_score_weight": spec.number_score_weight,
                             "structure_score_weight": spec.structure_score_weight,
+                            "portfolio_scoring_method": active_scoring_method,
                             "candidate_seed": candidate_seed,
                             "bank_seed": bank.bank_seed,
                             "bank_size": bank.bank_size,
@@ -375,6 +498,7 @@ def _shared_bank_experiment_batch(
                     "bank_hash": bank.bank_hash,
                     "candidate_numbers_hash": bank.candidate_numbers_hash,
                     "constraints_signature": bank.constraints_signature,
+                    "portfolio_scoring_method": active_scoring_method,
                 }
             target_bank_generation_count = len(banks_by_signature)
             for audit in audit_by_strategy.values():
@@ -414,6 +538,7 @@ def _shared_bank_experiment_batch(
                         "experiment_version": spec.experiment_version,
                         "experiment_config_sha256": config_hashes[spec.experiment_id],
                         "phase": spec.data_split.phase,
+                        "cohort_id": cohort_id,
                         "seed": seed,
                         "prediction_random_seed": predictions[strategy_name].random_seed,
                         "draw_date": validated.iloc[target_index]["draw_date"],
@@ -445,6 +570,10 @@ def _shared_bank_experiment_batch(
                     process_count=1,
                     total_cpu_time_seconds=cpu_seconds,
                     wall_clock_seconds=wall_seconds,
+                    candidate_array_conversion_seconds=candidate_array_conversion_seconds,
+                    portfolio_index_bank_seconds=portfolio_index_bank_seconds,
+                    vectorized_scoring_seconds=vectorized_scoring_seconds,
+                    final_object_construction_seconds=final_object_construction_seconds,
                 )
             )
     frame = pd.DataFrame.from_records(observations)
@@ -584,6 +713,7 @@ def run_experiment(
     target_issues: Sequence[str] | None = None,
     minimum_bank_size: int = 500,
     maximum_bank_search_trials: int = 80_000,
+    portfolio_scoring_method: PortfolioScoringMethod = "numpy_vectorized",
 ) -> ExperimentBatchResult:
     """Run one experiment, routing B1-B6 through the shared feasible-bank path."""
     options = {
@@ -605,6 +735,7 @@ def run_experiment(
             target_issues=target_issues,
             minimum_bank_size=minimum_bank_size,
             maximum_bank_search_trials=maximum_bank_search_trials,
+            portfolio_scoring_method=portfolio_scoring_method,
             **options,
         )
     if target_issues is not None:

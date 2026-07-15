@@ -7,6 +7,7 @@ from dlt_number_analysis.experiments.benchmark import (
 )
 from dlt_number_analysis.experiments.reporting import (
     ExperimentComparison,
+    assign_observation_cohorts,
     compare_to_constraint_matched_baseline,
     summarize_observations,
     write_ablation_results_csv,
@@ -100,6 +101,15 @@ from dlt_number_analysis.experiments.storage import (
     ExperimentPartitionStatus,
     ExperimentResultStore,
 )
+from dlt_number_analysis.experiments.vectorized_benchmark import (
+    VectorizedBenchmarkRun,
+    VectorizedTargetBenchmark,
+    benchmark_vectorized_target,
+    load_vectorized_benchmark_json,
+    run_vectorized_benchmark,
+    write_vectorized_benchmark_json,
+    write_vectorized_benchmark_report,
+)
 from dlt_number_analysis.experiments.worker import execute_experiment_process_task
 
 __all__ = [
@@ -136,13 +146,17 @@ __all__ = [
     "SharedComputationCache",
     "StagedAblationPlan",
     "TemporalDataSplit",
+    "VectorizedBenchmarkRun",
+    "VectorizedTargetBenchmark",
     "ablation_constraint_variants",
     "ablation_experiment_specs",
     "acquire_holdout_lock",
     "adjust_p_values_benjamini_hochberg",
     "adjust_p_values_holm",
+    "assign_observation_cohorts",
     "baseline_experiment_specs",
     "benchmark_pipeline_profiles",
+    "benchmark_vectorized_target",
     "build_experiment_pipeline_config",
     "build_process_tasks",
     "build_recency_ablation_score_cube",
@@ -156,6 +170,7 @@ __all__ = [
     "execute_experiment_process_task",
     "experiment_config_sha256",
     "finalize_holdout_lock",
+    "load_vectorized_benchmark_json",
     "materialize_ablation_candidate_pool",
     "paired_bootstrap_95_interval",
     "paired_metric_differences",
@@ -166,6 +181,7 @@ __all__ = [
     "run_experiment",
     "run_experiment_batch",
     "run_process_scheduler",
+    "run_vectorized_benchmark",
     "select_consecutive_development_targets",
     "select_stage_target_issues",
     "smoke_comparisons",
@@ -182,4 +198,6 @@ __all__ = [
     "write_process_scheduler_report",
     "write_runtime_benchmark_report",
     "write_smoke_comparisons_csv",
+    "write_vectorized_benchmark_json",
+    "write_vectorized_benchmark_report",
 ]

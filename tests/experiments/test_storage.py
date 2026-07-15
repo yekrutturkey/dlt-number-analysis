@@ -68,3 +68,16 @@ def test_phases_are_physically_isolated(tmp_path: Path) -> None:
     assert status.is_complete is True
     assert "calibration" in status.partition_path.parts
     assert store.load_all(phase="development").empty
+
+
+def test_existing_v051_smoke_parquet_remains_readable() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    store = ExperimentResultStore(project_root / "outputs" / "experiments")
+
+    b1 = store.read_partition("development", "B1", 20260000)
+    b2 = store.read_partition("development", "B2", 20260000)
+
+    assert len(b1) == 101
+    assert len(b2) == 100
+    assert b1["target_issue"].iloc[0] == "08008"
+    assert b2["target_issue"].tolist() == [f"{issue:05d}" for issue in range(8009, 8109)]

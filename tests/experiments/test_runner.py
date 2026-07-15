@@ -126,6 +126,16 @@ def test_b1_through_b6_build_one_bank_and_reuse_it_five_times() -> None:
     assert result.observations["bank_hash"].nunique() == 1
     assert set(result.observations["target_bank_generation_count"]) == {1}
     assert set(result.observations["target_portfolio_bank_reuse_count"]) == {5}
+    assert set(
+        result.observations.loc[
+            result.observations["experiment_id"] != "B1", "portfolio_scoring_method"
+        ]
+    ) == {"numpy_vectorized"}
+    assert set(
+        result.observations.loc[
+            result.observations["experiment_id"] == "B1", "portfolio_scoring_method"
+        ]
+    ) == {"random_bank_sample"}
     assert all(execution.portfolio_bank_reuse_count == 5 for execution in result.executions)
     assert result.observations["bank_size"].min() >= 100
 

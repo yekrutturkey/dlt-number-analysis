@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bootstrap-resamples", type=int, default=1000)
     parser.add_argument("--minimum-bank-size", type=int, default=500)
     parser.add_argument("--maximum-bank-search-trials", type=int, default=80_000)
+    parser.add_argument(
+        "--portfolio-scoring-method",
+        choices=("object_reference", "numpy_vectorized"),
+        default="numpy_vectorized",
+    )
     parser.add_argument("--report-only", action="store_true")
     parser.add_argument(
         "--inference-context",
@@ -317,6 +322,7 @@ def main(argv: list[str] | None = None) -> int:
                     "bootstrap_resamples": args.bootstrap_resamples,
                     "minimum_bank_size": args.minimum_bank_size,
                     "maximum_bank_search_trials": args.maximum_bank_search_trials,
+                    "portfolio_scoring_method": args.portfolio_scoring_method,
                     "holdout_lock_path": str(args.holdout_lock.resolve()),
                 },
             )

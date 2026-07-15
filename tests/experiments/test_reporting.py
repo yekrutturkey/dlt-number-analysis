@@ -14,6 +14,7 @@ from dlt_number_analysis.experiments import (
     ProcessSchedulerReport,
     RuntimeBenchmarkRecord,
     compare_to_constraint_matched_baseline,
+    summarize_observations,
     write_ablation_results_csv,
     write_data_quality_report,
     write_experiment_runtime_report,
@@ -127,7 +128,7 @@ def test_all_required_report_types_include_phase_or_risk_context(tmp_path: Path)
     assert all(DISCLAIMER in path.read_text(encoding="utf-8") for path in paths)
     assert DISCLAIMER in ablation.read_text(encoding="utf-8")
     summary = paths[1].read_text(encoding="utf-8")
-    assert "历史拟合" in summary
+    assert "完整 development" in summary
     assert "校准" in summary
     assert "最终留出" in summary
     assert "配对置换检验" in summary
@@ -136,3 +137,69 @@ def test_all_required_report_types_include_phase_or_risk_context(tmp_path: Path)
         item.statistically_significant_advantage == item.holm_significant_advantage
         for item in comparisons
     )
+
+
+def test_summary_and_paired_statistics_never_mix_target_cohorts(tmp_path: Path) -> None:
+    template = _observations().iloc[0].to_dict()
+    records: list[dict[str, object]] = []
+    for experiment_id in ("B0", "B7"):
+        for issue in ("26001", "26002", "26003", "26004"):
+            records.append(
+                {
+                    **template,
+                    "experiment_id": experiment_id,
+                    "experiment_version": f"full-{experiment_id}",
+                    "target_issue": issue,
+                    "seed": 20260000,
+                }
+            )
+    for experiment_id, offset in (("B1", 0), ("B2", 1)):
+        for issue in ("08009", "08010"):
+            records.append(
+                {
+                    **template,
+                    "experiment_id": experiment_id,
+                    "experiment_version": f"smoke-{experiment_id}",
+                    "target_issue": issue,
+                    "seed": 20260000,
+                    "best_front_hits": 1 + offset,
+                    "best_total_hits": 1 + offset,
+                }
+            )
+    records.append(
+        {
+            **template,
+            "experiment_id": "B1",
+            "experiment_version": "single-B1",
+            "target_issue": "08008",
+            "seed": 20260000,
+        }
+    )
+    observations = pd.DataFrame.from_records(records)
+
+    summary = summarize_observations(observations)
+    comparisons = compare_to_constraint_matched_baseline(
+        observations,
+        bootstrap_resamples=100,
+        permutations=100,
+        minimum_paired_observations=2,
+    )
+    report = write_experiment_summary_report(
+        observations,
+        comparisons,
+        tmp_path / "cohorts.md",
+        inference_context="smoke",
+    ).read_text(encoding="utf-8")
+
+    assert set(summary["cohort_id"]) == {
+        "development_full",
+        "v051_paired_smoke_100",
+        "single_correctness_smoke",
+    }
+    assert len(summary.loc[summary["experiment_id"] == "B1"]) == 2
+    assert {comparison.cohort_id for comparison in comparisons} == {"v051_paired_smoke_100"}
+    assert all(comparison.common_target_count == 2 for comparison in comparisons)
+    assert "完整 development 结果" in report
+    assert "v0.5.1 100期 paired smoke 结果" in report
+    assert "单期 correctness smoke 结果" in report
+    assert "共同配对期数：2" in report

@@ -220,6 +220,10 @@ def comparisons_frame(comparisons: Sequence[ExperimentComparison]) -> pd.DataFra
     """Return smoke statistics without turning p-values into an advantage claim."""
     columns = (
         "phase",
+        "cohort_id",
+        "target_start_issue",
+        "target_end_issue",
+        "common_target_count",
         "experiment_id",
         "baseline_id",
         "metric",

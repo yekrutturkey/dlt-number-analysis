@@ -14,6 +14,7 @@ from dlt_number_analysis.data import load_prize_rule_schedule, load_verified_his
 from dlt_number_analysis.experiments.runner import run_experiment_batch
 from dlt_number_analysis.experiments.scheduler import ExperimentProcessTask
 from dlt_number_analysis.pipeline import PipelineProfile
+from dlt_number_analysis.portfolio import PortfolioScoringMethod
 
 
 def execute_experiment_process_task(
@@ -40,6 +41,10 @@ def execute_experiment_process_task(
         bootstrap_resamples=int(parameters.get("bootstrap_resamples", 1000)),
         minimum_bank_size=int(parameters.get("minimum_bank_size", 500)),
         maximum_bank_search_trials=int(parameters.get("maximum_bank_search_trials", 80_000)),
+        portfolio_scoring_method=cast(
+            PortfolioScoringMethod,
+            str(parameters.get("portfolio_scoring_method", "numpy_vectorized")),
+        ),
         prize_tables=prize_tables,
         holdout_lock_path=(
             str(parameters["holdout_lock_path"]) if "holdout_lock_path" in parameters else None

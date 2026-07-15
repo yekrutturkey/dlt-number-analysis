@@ -32,6 +32,10 @@ class ExperimentComparison(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     phase: str
+    cohort_id: str
+    target_start_issue: str
+    target_end_issue: str
+    common_target_count: int = Field(ge=1)
     experiment_id: str
     baseline_id: str
     metric: str
@@ -51,11 +55,98 @@ class ExperimentComparison(BaseModel):
     )
 
 
+def _issue_tuple(values: pd.Series) -> tuple[str, ...]:
+    return tuple(sorted(set(values.astype(str)), key=int))
+
+
+def assign_observation_cohorts(observations: pd.DataFrame) -> pd.DataFrame:
+    """Assign exact target cohorts without modifying stored historical partitions."""
+    if observations.empty:
+        return observations.copy()
+    required = {"phase", "experiment_id", "target_issue", "seed"}
+    missing = required.difference(observations.columns)
+    if missing:
+        raise ValueError(f"experiment observations are missing cohort fields: {sorted(missing)}")
+    annotated = observations.copy()
+    annotated["target_issue"] = annotated["target_issue"].astype(str)
+    if "experiment_version" not in annotated:
+        annotated["experiment_version"] = "unknown"
+    if "cohort_id" not in annotated:
+        annotated["cohort_id"] = ""
+    annotated["cohort_id"] = annotated["cohort_id"].fillna("").astype(str)
+    unassigned = annotated["cohort_id"].eq("")
+    issues = pd.to_numeric(annotated["target_issue"], errors="raise")
+    paired_smoke = (
+        unassigned
+        & annotated["phase"].eq("development")
+        & annotated["experiment_id"].isin(("B1", "B2", "B3", "B4", "B5", "B6"))
+        & issues.between(8009, 8108)
+    )
+    annotated.loc[paired_smoke, "cohort_id"] = "v051_paired_smoke_100"
+    single_smoke = (
+        annotated["cohort_id"].eq("")
+        & annotated["phase"].eq("development")
+        & annotated["experiment_id"].eq("B1")
+        & issues.eq(8008)
+    )
+    annotated.loc[single_smoke, "cohort_id"] = "single_correctness_smoke"
+
+    remaining = annotated.loc[annotated["cohort_id"].eq("")]
+    if remaining.empty:
+        return annotated
+    group_columns = ["phase", "experiment_id", "experiment_version", "seed"]
+    target_sets = {
+        key: _issue_tuple(group["target_issue"])
+        for key, group in remaining.groupby(group_columns, sort=True, dropna=False)
+    }
+    signatures_by_phase: dict[str, set[tuple[str, ...]]] = {}
+    for key, targets in target_sets.items():
+        signatures_by_phase.setdefault(str(key[0]), set()).add(targets)
+    cohort_by_signature: dict[tuple[str, tuple[str, ...]], str] = {}
+    for phase, signatures in signatures_by_phase.items():
+        largest = max((len(signature) for signature in signatures), default=0)
+        largest_signatures = [signature for signature in signatures if len(signature) == largest]
+        for signature in signatures:
+            start, end = signature[0], signature[-1]
+            if len(largest_signatures) == 1 and signature == largest_signatures[0]:
+                cohort = {
+                    "development": "development_full",
+                    "calibration": "calibration",
+                    "final_holdout": "final_holdout",
+                }.get(phase, f"{phase}_full")
+            else:
+                cohort = f"{phase}_partial_{start}_{end}_{len(signature)}"
+            cohort_by_signature[(phase, signature)] = cohort
+    for key, targets in target_sets.items():
+        phase, experiment_id, experiment_version, seed = key
+        mask = (
+            annotated["cohort_id"].eq("")
+            & annotated["phase"].eq(phase)
+            & annotated["experiment_id"].eq(experiment_id)
+            & annotated["experiment_version"].eq(experiment_version)
+            & annotated["seed"].eq(seed)
+        )
+        annotated.loc[mask, "cohort_id"] = cohort_by_signature[(str(phase), targets)]
+    return annotated
+
+
+def _cohort_common_target_counts(observations: pd.DataFrame) -> dict[str, int]:
+    common: dict[str, int] = {}
+    for cohort_id, cohort in observations.groupby("cohort_id", sort=True):
+        target_sets = [
+            set(group["target_issue"].astype(str))
+            for _, group in cohort.groupby("experiment_id", sort=True)
+        ]
+        common[str(cohort_id)] = len(set.intersection(*target_sets)) if target_sets else 0
+    return common
+
+
 def summarize_observations(observations: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate key metrics independently inside each declared data phase."""
+    """Aggregate metrics only inside exact target cohorts and experiment versions."""
     if observations.empty:
         return pd.DataFrame()
-    numeric = observations.copy()
+    numeric = assign_observation_cohorts(observations)
+    common_counts = _cohort_common_target_counts(numeric)
     for column in (
         "best_front_hits",
         "best_total_hits",
@@ -68,9 +159,16 @@ def summarize_observations(observations: pd.DataFrame) -> pd.DataFrame:
     ):
         numeric[column] = pd.to_numeric(numeric[column], errors="coerce")
     return (
-        numeric.groupby(["phase", "experiment_id"], sort=True, dropna=False)
+        numeric.groupby(
+            ["phase", "cohort_id", "experiment_id", "experiment_version"],
+            sort=True,
+            dropna=False,
+        )
         .agg(
             observation_count=("target_issue", "size"),
+            target_start_issue=("target_issue", lambda values: min(values, key=int)),
+            target_end_issue=("target_issue", lambda values: max(values, key=int)),
+            seed_count=("seed", "nunique"),
             best_front_hits=("best_front_hits", "mean"),
             best_total_hits=("best_total_hits", "mean"),
             at_least_three_front_rate=("at_least_three_front", "mean"),
@@ -83,6 +181,7 @@ def summarize_observations(observations: pd.DataFrame) -> pd.DataFrame:
             roi_period_count=("roi", "count"),
         )
         .reset_index()
+        .assign(common_target_count=lambda frame: frame["cohort_id"].map(common_counts).astype(int))
     )
 
 
@@ -101,7 +200,8 @@ def compare_to_constraint_matched_baseline(
     comparisons: list[ExperimentComparison] = []
     if observations.empty:
         return ()
-    for phase, phase_frame in observations.groupby("phase", sort=True):
+    annotated = assign_observation_cohorts(observations)
+    for (phase, cohort_id), phase_frame in annotated.groupby(["phase", "cohort_id"], sort=True):
         baseline = phase_frame.loc[phase_frame["experiment_id"] == baseline_id]
         if baseline.empty:
             continue
@@ -129,6 +229,12 @@ def compare_to_constraint_matched_baseline(
                 comparisons.append(
                     ExperimentComparison(
                         phase=str(phase),
+                        cohort_id=str(cohort_id),
+                        target_start_issue=str(
+                            min(differences["target_issue"].astype(str), key=int)
+                        ),
+                        target_end_issue=str(max(differences["target_issue"].astype(str), key=int)),
+                        common_target_count=int(differences["target_issue"].nunique()),
                         experiment_id=str(experiment_id),
                         baseline_id=baseline_id,
                         metric=metric,
@@ -141,8 +247,13 @@ def compare_to_constraint_matched_baseline(
                     )
                 )
     corrected: list[ExperimentComparison] = []
-    for phase in sorted({comparison.phase for comparison in comparisons}):
-        family = [comparison for comparison in comparisons if comparison.phase == phase]
+    families = sorted({(comparison.phase, comparison.cohort_id) for comparison in comparisons})
+    for phase, cohort_id in families:
+        family = [
+            comparison
+            for comparison in comparisons
+            if comparison.phase == phase and comparison.cohort_id == cohort_id
+        ]
         p_values = [comparison.permutation_p_value for comparison in family]
         holm = adjust_p_values_holm(p_values)
         benjamini = adjust_p_values_benjamini_hochberg(p_values)
@@ -236,60 +347,83 @@ def write_experiment_summary_report(
     *,
     inference_context: Literal["formal", "smoke"] = "formal",
 ) -> Path:
-    """Write phase-separated results and paired-inference conclusions."""
+    """Write cohort-separated results and never rank incompatible target ranges."""
     summary = summarize_observations(observations)
     lines = [
         "# 严格策略实验汇总",
         "",
-        "本报告将历史拟合、校准和最终留出结果分开；随机波动不会被解释为预测能力。",
+        (
+            "本报告按共同目标期 cohort 分组；不同目标范围、种子或实验版本的平均值"
+            "不会放入同一横向排名。随机波动不会被解释为预测能力。"
+        ),
     ]
-    phase_titles = {
-        "development": "历史拟合（development）",
-        "calibration": "校准（calibration）",
-        "final_holdout": "最终留出（final holdout）",
+    cohort_titles = {
+        "development_full": "完整 development 结果",
+        "v051_paired_smoke_100": "v0.5.1 100期 paired smoke 结果",
+        "single_correctness_smoke": "单期 correctness smoke 结果",
+        "calibration": "校准（calibration）结果",
+        "final_holdout": "最终留出（final holdout）结果",
     }
-    for phase, title in phase_titles.items():
+    available = set(summary["cohort_id"].astype(str)) if not summary.empty else set()
+    ordered_cohorts = list(cohort_titles)
+    ordered_cohorts.extend(sorted(available.difference(ordered_cohorts)))
+    for cohort_id in ordered_cohorts:
+        title = cohort_titles.get(cohort_id, f"其他独立 cohort：{cohort_id}")
         lines.extend(["", f"## {title}", ""])
-        phase_summary = summary.loc[summary.get("phase", pd.Series(dtype=str)) == phase]
-        if phase_summary.empty:
+        cohort_summary = summary.loc[
+            summary.get("cohort_id", pd.Series(dtype=str)).astype(str) == cohort_id
+        ]
+        if cohort_summary.empty:
             lines.append("尚未执行或没有可用观测。")
         else:
-            lines.append(_markdown_table(phase_summary))
+            lines.append(_markdown_table(cohort_summary))
     lines.extend(["", "## 与 B1 约束匹配随机基线的配对比较", ""])
     if comparisons:
-        comparison_frame = pd.DataFrame(
-            [comparison.model_dump(mode="python") for comparison in comparisons]
-        )
-        lines.append(_markdown_table(comparison_frame))
-        if inference_context == "smoke":
-            lines.extend(
-                [
-                    "",
-                    (
-                        "本表是配对计算冒烟检查；不使用这 100 期选择参数，"
-                        "也不根据本表声明任何策略优势。"
-                    ),
-                ]
-            )
-        else:
-            significant = [
-                comparison
-                for comparison in comparisons
-                if comparison.statistically_significant_advantage
+        for cohort_id in sorted({comparison.cohort_id for comparison in comparisons}):
+            cohort_comparisons = [
+                comparison for comparison in comparisons if comparison.cohort_id == cohort_id
             ]
             lines.extend(
                 [
+                    f"### {cohort_titles.get(cohort_id, cohort_id)}",
                     "",
                     (
-                        "结论仅依据配对 bootstrap 与配对置换检验；"
-                        "没有使用两个独立置信区间是否重叠来判断优势；"
-                        "正式显著性结论采用更保守的 Holm 校正。"
+                        f"共同配对期数：{cohort_comparisons[0].common_target_count}；"
+                        "配对键为 cohort_id、target_issue 和 seed。"
                     ),
-                    f"显著优势条目数：{len(significant)}。",
+                    "",
+                    _markdown_table(
+                        pd.DataFrame(
+                            [item.model_dump(mode="python") for item in cohort_comparisons]
+                        )
+                    ),
                 ]
             )
+            if inference_context == "smoke" or "smoke" in cohort_id:
+                lines.extend(
+                    [
+                        "",
+                        "该 cohort 仅用于正确性冒烟，不用于参数选择或策略优势声明。",
+                    ]
+                )
+            else:
+                significant = [
+                    comparison
+                    for comparison in cohort_comparisons
+                    if comparison.statistically_significant_advantage
+                ]
+                lines.extend(
+                    [
+                        "",
+                        (
+                            "结论仅依据配对 bootstrap 与配对置换检验；"
+                            "正式显著性结论采用更保守的 Holm 校正。"
+                        ),
+                        f"该 cohort 显著优势条目数：{len(significant)}。",
+                    ]
+                )
     else:
-        lines.append("缺少至少 30 个同一期次、同一种子的 B1 配对结果，暂不能进行统计比较。")
+        lines.append("没有同一 cohort、同一期次、同一种子的足量 B1 配对结果。")
     lines.extend(["", f"> {DISCLAIMER}"])
     return _write_text(path, "\n".join(lines))
 
@@ -414,6 +548,16 @@ def write_experiment_runtime_report(
                         "ended_at": report.ended_at,
                         "total_cpu_time_seconds": execution.get("total_cpu_time_seconds"),
                         "wall_clock_seconds": execution.get("wall_clock_seconds"),
+                        "candidate_array_conversion_seconds": execution.get(
+                            "candidate_array_conversion_seconds"
+                        ),
+                        "portfolio_index_bank_seconds": execution.get(
+                            "portfolio_index_bank_seconds"
+                        ),
+                        "vectorized_scoring_seconds": execution.get("vectorized_scoring_seconds"),
+                        "final_object_construction_seconds": execution.get(
+                            "final_object_construction_seconds"
+                        ),
                         "failed_task_count": len(report.failed_tasks),
                     }
                 )

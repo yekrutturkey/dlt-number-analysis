@@ -478,6 +478,11 @@ def _selection_from_entry(
         scores=scores,
         optimizer_parameters={
             "selection_method": selection_method,
+            "portfolio_scoring_method": (
+                "object_reference"
+                if selection_method == "highest_objective_from_shared_feasible_portfolio_bank"
+                else "not_applicable_random_sampling"
+            ),
             "bank_seed": bank.bank_seed,
             "bank_size": bank.bank_size,
             "bank_acceptance_rate": bank.acceptance_rate,
@@ -565,6 +570,7 @@ def score_portfolio_bank(
                 **best.optimizer_parameters,
                 "selected_bank_entry_hash": best_hash,
                 "evaluated_portfolios": len(selections),
+                "portfolio_scoring_method": "object_reference",
             }
         }
     )

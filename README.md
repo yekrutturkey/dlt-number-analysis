@@ -6,6 +6,36 @@
 
 本项目只用于数据工程、统计分析与回测研究，不承诺、暗示或声称能够预测中奖号码。
 
+## v0.5.2：Portfolio 向量化评分与 cohort 报告
+
+v0.5.2 保留 v0.5.1 的候选池、可行银行、随机种子和硬约束语义，只替换 B2–B6 和消融配置的
+评分执行方式：
+
+- `CandidateArrayBundle` 将一个 `CandidatePool` 按原顺序转换一次，使用只读整数/浮点 NumPy
+  数组保存前后区号码、号码分、结构分、组合分及结构分类代码；票据号码身份映射不依赖
+  `candidate_id`。
+- `FeasiblePortfolioIndexBank` 为每个银行成员只保存 5 个候选索引，并预计算与评分配置无关的
+  diversity、core concentration、structure coverage 和 repeat penalty。
+- `CandidateScoreView` 只绑定号码分、结构分和组合分数组，不再为 B2–B6 或每个消融参数组合
+  重新构造 10,000 个 `CandidateTicketScore`。
+- `score_portfolio_bank_vectorized` 一次性计算全部银行成员，只为最终 entry 构造 5 张
+  `PortfolioTicket`、一个 `PortfolioScoreBreakdown` 和一个 `PortfolioSelection`。
+- 正式共享实验默认 `portfolio_scoring_method=numpy_vectorized`；
+  `object_reference` 继续作为语义参考实现。B1 仍从银行按种子随机抽取，不受向量评分影响。
+- 对象路径与数组路径的 B2–B6 测试在 entry hash、5注号码、core/support 和全部子评分上完全一致；
+  candidate ID/顺序扰动及完全同分 tie-break 也保持确定性。
+
+`experiment_summary.md` 现在按精确 target cohort 分组，分别展示完整 development、v0.5.1
+100期 paired smoke、单期 correctness smoke、calibration 和 final holdout。配对检验只在相同
+`cohort_id + target_issue + seed` 内进行，并明确保存起止期、共同期数、种子数和实验版本。
+
+本轮严格停止了未能在单条 5 分钟内完成的三期对象/向量性能命令：workers=1 在 301 秒停止，
+workers=2 在 281 秒停止，加上首次内存 API 失败约 10 秒，累计约 592 秒后不再运行实验。
+因此 [v0.5.2 小型基准报告](outputs/reports/v052_vectorized_benchmark.md) 将完整加速比和峰值内存
+标记为不可用，不从部分运行推断性能结论。后续基准已支持逐目标 checkpoint，但本轮不再重跑。
+
+评分不等于真实中奖概率，彩票开奖结果是随机事件。
+
 ## v0.5.1：实验正确性与计算复用
 
 v0.5.1 修正约束匹配随机基线并建立可中断恢复的共享计算路径：
