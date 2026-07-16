@@ -1,4 +1,4 @@
-"""Bounded three-target benchmark for object and NumPy Portfolio bank scoring."""
+"""Legacy v0.5.2 benchmark plus v0.5.3 staged-benchmark compatibility exports."""
 
 from __future__ import annotations
 
@@ -22,6 +22,21 @@ from dlt_number_analysis.experiments.shared_computation import (
     deterministic_subseed,
 )
 from dlt_number_analysis.experiments.specs import baseline_experiment_specs
+from dlt_number_analysis.experiments.staged_benchmark import (
+    PreparedBenchmarkPayload as PreparedBenchmarkPayload,
+)
+from dlt_number_analysis.experiments.staged_benchmark import (
+    V053BenchmarkPaths as V053BenchmarkPaths,
+)
+from dlt_number_analysis.experiments.staged_benchmark import (
+    run_v053_staged_benchmark as run_v053_staged_benchmark,
+)
+from dlt_number_analysis.experiments.staged_benchmark import (
+    write_v053_benchmark_report as write_v053_benchmark_report,
+)
+from dlt_number_analysis.experiments.staged_benchmark import (
+    write_v053_benchmark_summary as write_v053_benchmark_summary,
+)
 from dlt_number_analysis.pipeline import PROFILE_DEFAULTS, PipelineConfig
 from dlt_number_analysis.portfolio import (
     build_candidate_score_view,

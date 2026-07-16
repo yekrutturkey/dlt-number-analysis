@@ -1,0 +1,33 @@
+{
+  "bank_hash": "37dc162ada35fe13106592231904ddb0f29603ebb26bba5d9c9ab5e6173c1e91",
+  "bootstrap_resamples": 1000,
+  "candidate_numbers_hash": "957322ed34540f13da12334615c4b736c9ffce8e8b08902486f04611450489c9",
+  "data_cutoff_issue": "08008",
+  "error": null,
+  "evaluation_mode": "full_resampling",
+  "evaluation_seconds": 0.11124959999870043,
+  "execution": {
+    "cpu_seconds": 1.984375,
+    "gc_collection_counts": [
+      324,
+      30,
+      3
+    ],
+    "memory_error": null,
+    "memory_scope": "isolated_subprocess_peak",
+    "peak_memory_mb": 589.59375,
+    "process_exit_status": 0,
+    "timed_out": false,
+    "wall_clock_seconds": 2.002299200001289
+  },
+  "random_baseline_seed_count": 1000,
+  "reduced_resampling_override": false,
+  "result_count": 6,
+  "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。",
+  "schema_version": "v0.5.3",
+  "seed": 20260000,
+  "stage": "evaluation_full",
+  "status": "completed",
+  "strategy_summary_count": 6,
+  "target_issue": "08009"
+}

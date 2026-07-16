@@ -123,6 +123,23 @@ def _hit_metrics(prediction: PredictionRecord, actual_draw: DrawRecord) -> _HitM
     )
 
 
+def calculate_raw_hit_metrics(
+    prediction: PredictionRecord,
+    actual_draw: DrawRecord,
+) -> dict[str, int | bool | float]:
+    """Return hit-only metrics without Monte Carlo or historical bootstrap work."""
+    hits = _hit_metrics(prediction, actual_draw)
+    return {
+        "best_front_hits": hits.best_front_hits,
+        "best_back_hits": hits.best_back_hits,
+        "best_total_hits": hits.best_total_hits,
+        "at_least_three_front": hits.at_least_three_front,
+        "at_least_2_plus_1": hits.at_least_2_plus_1,
+        "ticket_hit_share": hits.ticket_hit_share,
+        "unique_hit_concentration": hits.unique_hit_concentration,
+    }
+
+
 def _random_hit_metrics(random_seed: int) -> _HitMetrics:
     rng = Random(random_seed)
     seen: set[tuple[tuple[int, ...], tuple[int, ...]]] = set()
@@ -359,13 +376,18 @@ def run_rolling_backtest(
     default_ticket_cost: Decimal = Decimal("2"),
     data_quality_report: DataQualityReport | None = None,
     allow_short_history: bool = False,
+    allow_reduced_resampling: bool = False,
 ) -> BacktestReport:
     """Run strict expanding-window predictions; never expose the target draw to a strategy."""
     if min_history < 1:
         raise ValueError("min_history must be at least 1")
-    if random_baseline_seed_count < 1000:
+    if random_baseline_seed_count < 1:
+        raise ValueError("random baseline must use at least one seed")
+    if random_baseline_seed_count < 1000 and not allow_reduced_resampling:
         raise ValueError("random baseline must use at least 1000 seeds")
-    if bootstrap_resamples < 100:
+    if bootstrap_resamples < 1:
+        raise ValueError("bootstrap_resamples must be at least one")
+    if bootstrap_resamples < 100 and not allow_reduced_resampling:
         raise ValueError("bootstrap_resamples must be at least 100")
     if default_ticket_cost <= 0:
         raise ValueError("default_ticket_cost must be positive")

@@ -208,6 +208,76 @@ def _bank_hash(bank: FeasiblePortfolioBank | dict[str, object]) -> str:
     return _sha256(payload)
 
 
+class FeasiblePortfolioSubset(BaseModel):
+    """Stable entry-hash prefix of a parent bank for bounded reference scoring."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    parent_bank_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    subset_size: int = Field(ge=1)
+    subset_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    first_entry_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    last_entry_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bank: FeasiblePortfolioBank
+
+    @model_validator(mode="after")
+    def validate_subset(self) -> Self:
+        ordered = tuple(sorted(self.bank.entries, key=lambda entry: entry.entry_hash))
+        entry_hashes = tuple(entry.entry_hash for entry in ordered)
+        if self.subset_size != self.bank.bank_size or self.subset_size != len(ordered):
+            raise ValueError("subset_size does not match the bounded bank")
+        if entry_hashes[0] != self.first_entry_hash or entry_hashes[-1] != self.last_entry_hash:
+            raise ValueError("subset boundary hashes do not match the bounded bank")
+        expected = _sha256(
+            {
+                "parent_bank_hash": self.parent_bank_hash,
+                "entry_hashes": entry_hashes,
+            }
+        )
+        if self.subset_hash != expected:
+            raise ValueError("subset_hash does not match the stable entry prefix")
+        return self
+
+
+def build_stable_portfolio_subset(
+    bank: FeasiblePortfolioBank,
+    subset_size: int,
+) -> FeasiblePortfolioSubset:
+    """Return the first N entries after deterministic entry-hash sorting."""
+    if not 1 <= subset_size <= bank.bank_size:
+        raise ValueError("subset_size must be inside the parent bank")
+    entries = tuple(sorted(bank.entries, key=lambda entry: entry.entry_hash))[:subset_size]
+    payload = bank.model_dump(mode="json", exclude={"bank_hash"})
+    payload.update(
+        {
+            "entries": [entry.model_dump(mode="json") for entry in entries],
+            "bank_size": subset_size,
+            "minimum_bank_size": min(bank.minimum_bank_size, subset_size),
+        }
+    )
+    hash_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"generation_seconds", "risk_disclaimer"}
+    }
+    payload["bank_hash"] = _sha256(hash_payload)
+    subset_bank = FeasiblePortfolioBank.model_validate(payload)
+    entry_hashes = tuple(entry.entry_hash for entry in entries)
+    return FeasiblePortfolioSubset(
+        parent_bank_hash=bank.bank_hash,
+        subset_size=subset_size,
+        subset_hash=_sha256(
+            {
+                "parent_bank_hash": bank.bank_hash,
+                "entry_hashes": entry_hashes,
+            }
+        ),
+        first_entry_hash=entry_hashes[0],
+        last_entry_hash=entry_hashes[-1],
+        bank=subset_bank,
+    )
+
+
 BankCacheKey = tuple[str, int, str]
 
 
@@ -481,7 +551,7 @@ def _selection_from_entry(
             "portfolio_scoring_method": (
                 "object_reference"
                 if selection_method == "highest_objective_from_shared_feasible_portfolio_bank"
-                else "not_applicable_random_sampling"
+                else "random_bank_sample"
             ),
             "bank_seed": bank.bank_seed,
             "bank_size": bank.bank_size,

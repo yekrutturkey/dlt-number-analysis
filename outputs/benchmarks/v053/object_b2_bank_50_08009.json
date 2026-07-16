@@ -1,0 +1,147 @@
+{
+  "all_results_identical": true,
+  "all_score_errors_within_1e_12": true,
+  "bank_hash": "37dc162ada35fe13106592231904ddb0f29603ebb26bba5d9c9ab5e6173c1e91",
+  "candidate_numbers_hash": "957322ed34540f13da12334615c4b736c9ffce8e8b08902486f04611450489c9",
+  "candidate_rescoring_seconds": 0.12953949999791803,
+  "combined_portfolio_score": 0.7534682845196481,
+  "constraints_signature": "bb47f959729478e89bc0414745ad15db1b74ebbbd90f8d3944febbde24d49ef1",
+  "core_front_numbers": [
+    11,
+    28,
+    30
+  ],
+  "core_support_identical": true,
+  "data_cutoff_issue": "08008",
+  "entry_hash_identical": true,
+  "error": null,
+  "execution": {
+    "cpu_seconds": 3.140625,
+    "gc_collection_counts": [
+      716,
+      66,
+      3
+    ],
+    "memory_error": null,
+    "memory_scope": "isolated_subprocess_peak",
+    "peak_memory_mb": 589.625,
+    "process_exit_status": 0,
+    "timed_out": false,
+    "wall_clock_seconds": 3.140984399993613
+  },
+  "first_entry_hash": "0084f4e29bf71041c7cd75b7cb8ec0b3a2d8432dc4679b9f4320c4f1231bfe2e",
+  "last_entry_hash": "0ad9352108e2e47878e536c45ac815acaff451fe1223580e50281e2dc4369199",
+  "parent_bank_hash": "37dc162ada35fe13106592231904ddb0f29603ebb26bba5d9c9ab5e6173c1e91",
+  "portfolio_object_scoring_seconds": 1.227726500001154,
+  "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。",
+  "same_size_vectorized_entry_hash": "07f65bab692e22e6d6a89b25930fbbbf452c67a10c09e68f6a7131a3be9735dc",
+  "schema_version": "v0.5.3",
+  "score_absolute_errors": {
+    "combined_portfolio_score": 0.0,
+    "core_concentration": 0.0,
+    "excessive_repeat_penalty": 0.0,
+    "portfolio_diversity": 0.0,
+    "single_ticket_score": 0.0,
+    "structure_coverage": 0.0
+  },
+  "scores": {
+    "combined_portfolio_score": 0.7534682845196481,
+    "core_concentration": 0.9285714285714286,
+    "excessive_repeat_penalty": 0.025,
+    "portfolio_diversity": 0.8633333333333333,
+    "single_ticket_score": 0.5629983042235566,
+    "structure_coverage": 1.0
+  },
+  "seconds_per_100_portfolios": 2.7145353999949293,
+  "seed": 20260000,
+  "selected_entry_hash": "07f65bab692e22e6d6a89b25930fbbbf452c67a10c09e68f6a7131a3be9735dc",
+  "stage": "object_sample",
+  "status": "completed",
+  "subset_hash": "28fcd0cf20653ae759ea8ddb91e024d5692c575f47ee45545f54776b62c4d3c3",
+  "subset_size": 50,
+  "support_front_numbers": [
+    15,
+    20,
+    34
+  ],
+  "target_issue": "08009",
+  "tickets": [
+    {
+      "back_numbers": [
+        1,
+        5
+      ],
+      "candidate_id": "08009-candidate-09338",
+      "front_numbers": [
+        1,
+        21,
+        24,
+        28,
+        31
+      ],
+      "ticket_role": "core_stable"
+    },
+    {
+      "back_numbers": [
+        4,
+        9
+      ],
+      "candidate_id": "08009-candidate-07774",
+      "front_numbers": [
+        2,
+        9,
+        10,
+        15,
+        30
+      ],
+      "ticket_role": "core_stable"
+    },
+    {
+      "back_numbers": [
+        2,
+        8
+      ],
+      "candidate_id": "08009-candidate-03507",
+      "front_numbers": [
+        5,
+        20,
+        25,
+        30,
+        34
+      ],
+      "ticket_role": "exploration"
+    },
+    {
+      "back_numbers": [
+        4,
+        6
+      ],
+      "candidate_id": "08009-candidate-08463",
+      "front_numbers": [
+        8,
+        11,
+        15,
+        17,
+        20
+      ],
+      "ticket_role": "exploration"
+    },
+    {
+      "back_numbers": [
+        7,
+        12
+      ],
+      "candidate_id": "08009-candidate-07486",
+      "front_numbers": [
+        11,
+        19,
+        28,
+        30,
+        34
+      ],
+      "ticket_role": "core_stable"
+    }
+  ],
+  "tickets_identical": true,
+  "total_seconds": 1.3572676999974647
+}

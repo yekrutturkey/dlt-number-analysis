@@ -58,7 +58,7 @@ class BacktestPeriodResult(BaseModel):
     roi: Decimal | None
     prize_rule_version: str | None
     prize_data_available: bool
-    random_baseline_seed_count: int = Field(ge=1000)
+    random_baseline_seed_count: int = Field(ge=1)
     random_metric_percentiles: dict[str, float]
 
     @property
@@ -76,7 +76,7 @@ class RandomBaselineSummary(BaseModel):
     cache_key: str = Field(min_length=1)
     cache_reused: bool
     seed_start: int
-    seed_count: int = Field(ge=1000)
+    seed_count: int = Field(ge=1)
     metric_summaries: dict[str, RandomMetricSummary]
 
 

@@ -23,6 +23,7 @@ from dlt_number_analysis.portfolio import (
     PortfolioSelection,
     build_candidate_score_view,
     build_feasible_portfolio_bank,
+    build_stable_portfolio_subset,
     candidate_numbers_hash,
     candidate_pool_to_array_bundle,
     candidate_score_view_from_arrays,
@@ -574,9 +575,85 @@ def test_b1_sampling_is_independent_of_score_view(
         original.optimizer_parameters["selected_bank_entry_hash"]
         == rescored.optimizer_parameters["selected_bank_entry_hash"]
     )
+    assert original.optimizer_parameters["portfolio_scoring_method"] == "random_bank_sample"
     assert [(ticket.front_numbers, ticket.back_numbers) for ticket in original.tickets] == [
         (ticket.front_numbers, ticket.back_numbers) for ticket in rescored.tickets
     ]
+
+
+def test_stable_portfolio_subset_hash_and_boundaries_are_deterministic(
+    vectorized_bank: FeasiblePortfolioBank,
+) -> None:
+    first = build_stable_portfolio_subset(vectorized_bank, 20)
+    second = build_stable_portfolio_subset(vectorized_bank, 20)
+
+    assert first == second
+    assert first.parent_bank_hash == vectorized_bank.bank_hash
+    assert first.subset_size == 20
+    assert first.first_entry_hash == min(entry.entry_hash for entry in vectorized_bank.entries)
+    assert (
+        first.last_entry_hash == sorted(entry.entry_hash for entry in vectorized_bank.entries)[19]
+    )
+
+
+@pytest.fixture(scope="module")
+def benchmark_subset_bank(candidate_pool: CandidatePool) -> FeasiblePortfolioBank:
+    return build_feasible_portfolio_bank(
+        candidate_pool,
+        bank_seed=5301,
+        search_trials=2_000,
+        maximum_bank_size=250,
+    )
+
+
+def test_b2_object_and_vectorized_match_for_50_100_250_subsets(
+    candidate_pool: CandidatePool,
+    benchmark_subset_bank: FeasiblePortfolioBank,
+) -> None:
+    history = make_history()
+    scorer = ScorerSpec(name="uniform_score")
+    materialized = rescore_candidate_pool(
+        history,
+        candidate_pool,
+        scorer_spec=scorer,
+        number_score_weight=0.5,
+        structure_score_weight=0.5,
+    )
+    bundle = candidate_pool_to_array_bundle(candidate_pool)
+    score_view = build_candidate_score_view(
+        history,
+        bundle,
+        scorer_spec=scorer,
+        number_score_weight=0.5,
+        structure_score_weight=0.5,
+    )
+    for subset_size in (50, 100, 250):
+        subset = build_stable_portfolio_subset(benchmark_subset_bank, subset_size)
+        reference = score_portfolio_bank(materialized, subset.bank, random_seed=20260000)
+        vectorized = score_portfolio_bank_vectorized(
+            score_view,
+            feasible_portfolio_bank_to_index_bank(bundle, subset.bank),
+            random_seed=20260000,
+        )
+
+        assert (
+            reference.selection.optimizer_parameters["selected_bank_entry_hash"]
+            == vectorized.selected_entry_hash
+        )
+        assert [
+            (ticket.front_numbers, ticket.back_numbers) for ticket in reference.selection.tickets
+        ] == [
+            (ticket.front_numbers, ticket.back_numbers) for ticket in vectorized.selection.tickets
+        ]
+        assert reference.selection.core_front_numbers == vectorized.selection.core_front_numbers
+        assert (
+            reference.selection.support_front_numbers == vectorized.selection.support_front_numbers
+        )
+        for field, value in reference.selection.scores.model_dump().items():
+            assert value == pytest.approx(
+                vectorized.selection.scores.model_dump()[field],
+                abs=1e-12,
+            )
 
 
 def test_vectorized_identity_survives_candidate_id_and_order_changes(
