@@ -14,6 +14,7 @@ from dlt_number_analysis.backtesting import (
     BacktestPeriodResult,
     calculate_raw_hit_metrics,
     clear_random_baseline_cache,
+    evaluate_prediction_raw_observation,
     run_rolling_backtest,
 )
 from dlt_number_analysis.data import CSV_COLUMNS, DrawRecord
@@ -189,7 +190,59 @@ def test_raw_hit_metrics_skip_resampling_outputs() -> None:
         "at_least_2_plus_1": True,
         "ticket_hit_share": pytest.approx(0.6),
         "unique_hit_concentration": pytest.approx(0.6),
+        "front_pool_coverage": 4,
+        "back_pool_coverage": 1,
     }
+
+
+def test_raw_observation_matches_full_result_hits_without_resampling_fields() -> None:
+    draws = make_draws().iloc[:3].copy()
+    table = load_prize_table(PRIZE_TABLE_PATH)
+    full = run_rolling_backtest(
+        draws,
+        table,
+        strategies={"fixed": fixed_strategy},
+        min_history=2,
+        prize_context_by_issue={"26016": "pool_below_800m"},
+    )
+    full_result = next(item for item in full.results if item.strategy_name == "fixed")
+    prediction = fixed_strategy(
+        target_issue="26016",
+        data_cutoff_issue="26015",
+        generated_at=datetime.fromisoformat("2026-02-04T23:59:00+08:00"),
+        random_seed=full_result.random_seed,
+    )
+    raw = evaluate_prediction_raw_observation(
+        prediction,
+        DrawRecord.model_validate(draws.iloc[2].to_dict()),
+        table,
+        prize_context_by_issue={"26016": "pool_below_800m"},
+    )
+
+    for field in type(raw).model_fields:
+        assert getattr(raw, field) == getattr(full_result, field)
+    assert "random_metric_percentiles" not in raw.model_dump()
+    assert "random_baseline_seed_count" not in raw.model_dump()
+
+
+def test_raw_observation_preserves_hits_when_historical_prize_data_is_missing() -> None:
+    draws = make_draws().iloc[:3].copy()
+    prediction = fixed_strategy(
+        target_issue="26016",
+        data_cutoff_issue="26015",
+        generated_at=datetime.fromisoformat("2026-02-04T23:59:00+08:00"),
+        random_seed=1,
+    )
+
+    raw = evaluate_prediction_raw_observation(
+        prediction,
+        DrawRecord.model_validate(draws.iloc[2].to_dict()),
+    )
+
+    assert raw.best_total_hits == 3
+    assert raw.total_prize is None
+    assert raw.roi is None
+    assert raw.prize_data_available is False
 
 
 def test_legacy_hit_concentration_input_migrates_to_ticket_hit_share() -> None:

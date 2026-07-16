@@ -73,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--random-baseline-seeds", type=int, default=1000)
     parser.add_argument("--bootstrap-resamples", type=int, default=1000)
+    parser.add_argument(
+        "--evaluation-mode",
+        choices=("raw_observation", "full_resampling"),
+        help="defaults to raw observation except for the mandatory full final holdout",
+    )
     parser.add_argument("--minimum-bank-size", type=int, default=500)
     parser.add_argument("--maximum-bank-search-trials", type=int, default=80_000)
     parser.add_argument(
@@ -307,6 +312,11 @@ def main(argv: list[str] | None = None) -> int:
             if not targets:
                 continue
             final_holdout = grouped_specs[0].data_split.phase == "final_holdout"
+            evaluation_mode = args.evaluation_mode or (
+                "full_resampling" if final_holdout else "raw_observation"
+            )
+            if final_holdout and evaluation_mode != "full_resampling":
+                raise ValueError("final_holdout requires full_resampling evaluation")
             tasks = build_process_tasks(
                 grouped_specs,
                 targets,
@@ -320,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
                     "minimum_history": args.minimum_history,
                     "random_baseline_seed_count": args.random_baseline_seeds,
                     "bootstrap_resamples": args.bootstrap_resamples,
+                    "evaluation_mode": evaluation_mode,
                     "minimum_bank_size": args.minimum_bank_size,
                     "maximum_bank_search_trials": args.maximum_bank_search_trials,
                     "portfolio_scoring_method": args.portfolio_scoring_method,

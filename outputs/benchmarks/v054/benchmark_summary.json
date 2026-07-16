@@ -1,0 +1,161 @@
+{
+  "benchmark_config_sha256": "3895d14e022d6227a6925d62df2869a25173273b4543aa5e3e8fa3ed6e242857",
+  "benchmark_status": "completed",
+  "benchmark_version": "v0.5.4-production-runner-v1",
+  "completed_target_issues": [
+    "08009",
+    "08010",
+    "08011",
+    "08012",
+    "08013",
+    "08014",
+    "08015",
+    "08016",
+    "08017",
+    "08018"
+  ],
+  "controller_elapsed_seconds": 37.3861598999938,
+  "engineering_decision": {
+    "autodl": "暂不需要AutoDL。",
+    "band": "at_or_below_4_seconds",
+    "enter_full_development": true,
+    "local_run": "本地串行可行，预计约数小时。"
+  },
+  "evaluation_mode": "raw_observation",
+  "extrapolation": {
+    "conservative_development_serial_seconds": 6702.664107834961,
+    "development_target_count": 1637,
+    "estimated_development_serial_seconds": 5089.251129293839,
+    "kind": "estimated"
+  },
+  "measured_target_count": 10,
+  "measured_total_seconds": 31.088888999962364,
+  "measurement_kind": "measured",
+  "requested_target_count": 10,
+  "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。",
+  "stage_distributions": {
+    "b1_sampling_seconds": {
+      "maximum": 0.26747889998659957,
+      "mean": 0.06016302000207361,
+      "median": 0.03671330000361195,
+      "minimum": 0.034156800000346266,
+      "p90": 0.06712198000750497,
+      "standard_deviation": 0.06916780612343267
+    },
+    "bank_generation_seconds": {
+      "maximum": 0.8339203000068665,
+      "mean": 0.6692309499994735,
+      "median": 0.6265509000004386,
+      "minimum": 0.5579418999986956,
+      "p90": 0.827899120010261,
+      "standard_deviation": 0.09314457108636252
+    },
+    "candidate_array_conversion_seconds": {
+      "maximum": 0.12317070001154207,
+      "mean": 0.10370016000088071,
+      "median": 0.09982309999759309,
+      "minimum": 0.09202300000470132,
+      "p90": 0.11477054999995744,
+      "standard_deviation": 0.009183159171474862
+    },
+    "candidate_generation_seconds": {
+      "maximum": 1.9335670000000391,
+      "mean": 1.7689708399993833,
+      "median": 1.7517072999908123,
+      "minimum": 1.615349999992759,
+      "p90": 1.8669513400047435,
+      "standard_deviation": 0.09018280227049734
+    },
+    "checkpoint_write_seconds": {
+      "maximum": 0.060737399995559826,
+      "mean": 0.04070647999906214,
+      "median": 0.03803465000237338,
+      "minimum": 0.034897499994258396,
+      "p90": 0.044957880004949394,
+      "standard_deviation": 0.007178328813502487
+    },
+    "final_object_construction_seconds": {
+      "maximum": 0.0015891999937593937,
+      "mean": 0.001287390000652522,
+      "median": 0.0012050999939674512,
+      "minimum": 0.0011113000218756497,
+      "p90": 0.0014996500060078688,
+      "standard_deviation": 0.00015431266775749685
+    },
+    "history_slice_seconds": {
+      "maximum": 0.00046239999937824905,
+      "mean": 0.00035188999900128695,
+      "median": 0.00033104999602073804,
+      "minimum": 0.00030810000316705555,
+      "p90": 0.00042379000660730526,
+      "standard_deviation": 4.81206922939775e-05
+    },
+    "observation_serialization_seconds": {
+      "maximum": 0.0008538999973097816,
+      "mean": 0.0005415899999206885,
+      "median": 0.0005270999972708523,
+      "minimum": 0.0004135999915888533,
+      "p90": 0.0006246700068004428,
+      "standard_deviation": 0.00011622786696808803
+    },
+    "portfolio_index_bank_seconds": {
+      "maximum": 0.03805470000952482,
+      "mean": 0.03652052000106778,
+      "median": 0.03648029999749269,
+      "minimum": 0.03508499999588821,
+      "p90": 0.037890540003718345,
+      "standard_deviation": 0.0010725910753901122
+    },
+    "raw_evaluation_seconds": {
+      "maximum": 0.0004110999871045351,
+      "mean": 0.000285730000177864,
+      "median": 0.0002686500010895543,
+      "minimum": 0.00023400000645779073,
+      "p90": 0.0003378399924258701,
+      "standard_deviation": 5.132858455195799e-05
+    },
+    "score_view_seconds": {
+      "maximum": 0.11966350000875536,
+      "mean": 0.10587803000380518,
+      "median": 0.10366124999563908,
+      "minimum": 0.09959899999375921,
+      "p90": 0.11279902002133894,
+      "standard_deviation": 0.005850830339300983
+    },
+    "target_total_seconds": {
+      "maximum": 3.288470999992569,
+      "mean": 3.1088888999962365,
+      "median": 3.1119726999895647,
+      "minimum": 2.8674073000001954,
+      "p90": 3.2755841699865416,
+      "standard_deviation": 0.12041079599693558
+    },
+    "vectorized_scoring_seconds": {
+      "maximum": 0.0007153000333346426,
+      "mean": 0.0005543600040255114,
+      "median": 0.0005241000035312027,
+      "minimum": 0.00048199997399933636,
+      "p90": 0.0006958600031794048,
+      "standard_deviation": 7.816275221478123e-05
+    }
+  },
+  "target_total_seconds_distribution": {
+    "maximum": 3.288470999992569,
+    "mean": 3.1088888999962365,
+    "median": 3.1119726999895647,
+    "minimum": 2.8674073000001954,
+    "p90": 3.2755841699865416,
+    "standard_deviation": 0.12041079599693558
+  },
+  "timed_out": false,
+  "unrun_experiments": [
+    "object_reference",
+    "20/100 target benchmarks",
+    "full development",
+    "360 ablations",
+    "calibration",
+    "final holdout",
+    "multiple seeds",
+    "multi-process benchmark"
+  ]
+}

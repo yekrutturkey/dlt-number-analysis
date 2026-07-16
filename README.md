@@ -1,5 +1,26 @@
 # dlt-number-analysis
 
+## v0.5.4：正式批量 Runner 的 raw observation 模式
+
+共享 B1–B6 Runner 现在显式支持 `raw_observation` 与 `full_resampling`。前者只对已经生成的
+`PredictionRecord` 计算直接命中及当期可用奖金，完全跳过随机 Monte Carlo、百分位、Bootstrap、
+策略汇总和单期 `run_rolling_backtest`；后者保持原有完整统计语义和 1000/1000 默认重采样。批量开发
+实验推荐 raw 模式，final holdout 强制 full 模式。两种模式均写入 `evaluation_mode` 审计字段。
+
+受限性能入口为：
+
+```powershell
+uv run python scripts/run_v054_batch_runner_benchmark.py
+uv run python scripts/run_v054_batch_runner_benchmark.py --resume-check-only
+```
+
+该入口硬限制为 08009–08018、B1–B6、seed 20260000、fast、NumPy 向量化、raw、单进程，
+并将结果与正式实验分区隔离在 `outputs/benchmarks/v054/`。第二条命令只校验并汇总 checkpoint，
+不会重新生成候选号码或 Portfolio 银行。
+
+26079 期的用户提供信息尚未经过两个独立官方/公开来源交叉核验，本版本不将其追加到冻结的 v0.5
+历史快照；它只能在新的、完成来源核验的历史快照版本中加入。
+
 中国体育彩票超级大乐透（以下简称“大乐透”）历史开奖数据校验、统计特征、策略比较与严格时间序列滚动回测项目。
 
 > **重要声明：评分不等于真实中奖概率，彩票开奖结果是随机事件。**

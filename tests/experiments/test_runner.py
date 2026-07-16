@@ -105,19 +105,33 @@ def test_b1_and_b2_share_candidates_bank_and_constraints_for_one_target() -> Non
     assert set(result.observations["target_candidate_reuse_count"]) == {1}
     assert set(result.observations["target_bank_generation_count"]) == {1}
     assert set(result.observations["target_portfolio_bank_reuse_count"]) == {1}
+    assert set(result.observations["evaluation_mode"]) == {"full_resampling"}
+    assert set(result.observations["random_baseline_seed_count"]) == {1000}
 
 
-def test_b1_through_b6_build_one_bank_and_reuse_it_five_times() -> None:
+def test_b1_through_b6_raw_build_one_bank_and_skip_full_backtest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     specs = baseline_experiment_specs(seeds=(79,))[1:7]
+
+    def fail_if_called(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("raw observation must not call run_rolling_backtest")
+
+    monkeypatch.setattr(
+        "dlt_number_analysis.experiments.runner.run_rolling_backtest",
+        fail_if_called,
+    )
 
     result = run_experiment_batch(
         _history(),
         specs,
         minimum_history=3,
         target_issues=("26004",),
-        random_baseline_seed_count=1000,
-        bootstrap_resamples=100,
+        random_baseline_seed_count=1,
+        bootstrap_resamples=1,
         minimum_bank_size=100,
+        evaluation_mode="raw_observation",
     )
 
     assert len(result.observations) == 6
@@ -138,6 +152,23 @@ def test_b1_through_b6_build_one_bank_and_reuse_it_five_times() -> None:
     ) == {"random_bank_sample"}
     assert all(execution.portfolio_bank_reuse_count == 5 for execution in result.executions)
     assert result.observations["bank_size"].min() >= 100
+    assert set(result.observations["evaluation_mode"]) == {"raw_observation"}
+    assert {timing.evaluation_mode for timing in result.target_timings} == {"raw_observation"}
+    assert result.target_timings[0].raw_evaluation_seconds >= 0
+
+
+def test_final_holdout_rejects_raw_observation() -> None:
+    spec = baseline_experiment_specs(seeds=(79,), phase="final_holdout")[1]
+
+    with pytest.raises(ValueError, match="full_resampling"):
+        run_experiment_batch(
+            _history(),
+            (spec,),
+            minimum_history=3,
+            target_issues=("26009",),
+            evaluation_mode="raw_observation",
+            holdout_lock_path="unused.json",
+        )
 
 
 def test_small_ablation_batch_uses_shared_cube_and_constraint_bank() -> None:

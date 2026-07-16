@@ -23,6 +23,7 @@ from dlt_number_analysis.backtesting.models import (
     ConfidenceInterval,
     RandomBaselineSummary,
     RandomMetricSummary,
+    RawObservationResult,
 )
 from dlt_number_analysis.data import (
     CSV_COLUMNS,
@@ -137,7 +138,65 @@ def calculate_raw_hit_metrics(
         "at_least_2_plus_1": hits.at_least_2_plus_1,
         "ticket_hit_share": hits.ticket_hit_share,
         "unique_hit_concentration": hits.unique_hit_concentration,
+        "front_pool_coverage": hits.front_pool_coverage,
+        "back_pool_coverage": hits.back_pool_coverage,
     }
+
+
+def evaluate_prediction_raw_observation(
+    prediction: PredictionRecord,
+    actual_draw: DrawRecord,
+    prize_table: PrizeTable | None = None,
+    *,
+    prize_context_by_issue: Mapping[str, str] | None = None,
+    prize_tables: Sequence[PrizeTable] | None = None,
+    issue_prize_records: Mapping[str, IssuePrizeRecord] | None = None,
+    default_ticket_cost: Decimal = Decimal("2"),
+) -> RawObservationResult:
+    """Evaluate one saved prediction directly, with no resampling side effects."""
+    if prediction.target_issue != actual_draw.issue:
+        raise ValueError("prediction target issue differs from actual draw")
+    if int(prediction.data_cutoff_issue) >= int(actual_draw.issue):
+        raise ValueError("prediction cutoff must precede the actual draw")
+    if default_ticket_cost <= 0:
+        raise ValueError("default_ticket_cost must be positive")
+    hits = _hit_metrics(prediction, actual_draw)
+    (
+        any_prize,
+        total_cost,
+        total_prize,
+        roi,
+        prize_rule_version,
+        prize_data_available,
+    ) = _evaluate_monetary_result(
+        prediction,
+        actual_draw,
+        _build_schedule(prize_table, prize_tables),
+        prize_contexts=dict(prize_context_by_issue or {}),
+        issue_prize_records=dict(issue_prize_records or {}),
+        default_ticket_cost=default_ticket_cost,
+    )
+    return RawObservationResult(
+        target_issue=actual_draw.issue,
+        data_cutoff_issue=prediction.data_cutoff_issue,
+        strategy_name=prediction.strategy_name,
+        random_seed=prediction.random_seed,
+        best_front_hits=hits.best_front_hits,
+        best_back_hits=hits.best_back_hits,
+        best_total_hits=hits.best_total_hits,
+        at_least_three_front=hits.at_least_three_front,
+        at_least_2_plus_1=hits.at_least_2_plus_1,
+        ticket_hit_share=hits.ticket_hit_share,
+        unique_hit_concentration=hits.unique_hit_concentration,
+        front_pool_coverage=hits.front_pool_coverage,
+        back_pool_coverage=hits.back_pool_coverage,
+        total_cost=total_cost,
+        total_prize=total_prize,
+        roi=roi,
+        any_prize=any_prize,
+        prize_rule_version=prize_rule_version,
+        prize_data_available=prize_data_available,
+    )
 
 
 def _random_hit_metrics(random_seed: int) -> _HitMetrics:

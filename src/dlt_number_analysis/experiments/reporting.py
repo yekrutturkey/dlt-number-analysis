@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -23,6 +24,8 @@ from dlt_number_analysis.experiments.statistics import (
     paired_bootstrap_95_interval,
     paired_metric_differences,
     paired_permutation_test,
+    performance_by_seed,
+    performance_by_year,
 )
 
 
@@ -52,6 +55,44 @@ class ExperimentComparison(BaseModel):
     inference_method: str = (
         "paired bootstrap plus paired sign-flip permutation test with Holm and "
         "Benjamini-Hochberg corrections"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RawObservationStatistics:
+    """Statistics materialized only from stored raw observation partitions."""
+
+    experiment_summary: pd.DataFrame
+    performance_by_year: pd.DataFrame
+    performance_by_seed: pd.DataFrame
+    baseline_comparisons: tuple[ExperimentComparison, ...]
+
+
+def summarize_raw_observation_partitions(
+    observations: pd.DataFrame,
+    *,
+    bootstrap_resamples: int = 2000,
+    permutations: int = 5000,
+    minimum_paired_observations: int = 30,
+) -> RawObservationStatistics:
+    """Run statistics from raw rows only, without any prediction-generation dependency."""
+    if observations.empty:
+        return RawObservationStatistics(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ())
+    if "evaluation_mode" not in observations:
+        raise ValueError("raw statistics require an evaluation_mode audit column")
+    modes = set(observations["evaluation_mode"].astype(str))
+    if modes != {"raw_observation"}:
+        raise ValueError("raw statistics accept only raw_observation partitions")
+    return RawObservationStatistics(
+        experiment_summary=summarize_observations(observations),
+        performance_by_year=performance_by_year(observations),
+        performance_by_seed=performance_by_seed(observations),
+        baseline_comparisons=compare_to_constraint_matched_baseline(
+            observations,
+            bootstrap_resamples=bootstrap_resamples,
+            permutations=permutations,
+            minimum_paired_observations=minimum_paired_observations,
+        ),
     )
 
 

@@ -1,0 +1,53 @@
+{
+  "bank_hash": "7d99db141b46a48678600f70666777c1a58554852705123f32ef1400672149f2",
+  "benchmark_config_sha256": "3895d14e022d6227a6925d62df2869a25173273b4543aa5e3e8fa3ed6e242857",
+  "benchmark_version": "v0.5.4-production-runner-v1",
+  "candidate_numbers_hash": "52c7d5f8de873b64427108be40ec273b4ed48fcf23581dfe14adfcde1373106a",
+  "evaluation_mode": "raw_observation",
+  "experiment_config_sha256": {
+    "B1": "a0a2097db4987d6debe998ddbfd5eaf47dd2648f31243dd6a7d7cc8d9294e1ee",
+    "B2": "02229c4372abf522add3226a3509da5882794c4ca900a3cfd068b7d339fadbae",
+    "B3": "ae13ac48d1bfa88d065c8fb159696aa28a4572da3bd6dec3087ae8ea07bd63eb",
+    "B4": "832424e82d58c66d211bb768935084161ce3a7171b42a1d1fd64d2d9d7b45dff",
+    "B5": "5cde488a7cef1acc25314a6d29c51510f2d2a2c58bf3842eb75b8b570ee5c20e",
+    "B6": "975449f252073f378328cbaa2abc872a763b37959e1053e652baf4766a51b943"
+  },
+  "history_prefix_sha256": "317df409abe98ed736e43f22c8f938251bd9aeaf62f8b32914cf43934432e10d",
+  "parquet_sha256": "eab58b726678133b7b7c092311b4f08e408cbdd4f9f36a9b23c35d48dd3ae011",
+  "primary_key": [
+    "benchmark_version",
+    "experiment_id",
+    "experiment_version",
+    "phase",
+    "seed",
+    "target_issue"
+  ],
+  "schema_version": "v0.5.4",
+  "seed": 20260000,
+  "target_issue": "08013",
+  "timing": {
+    "acceptance_rate": 0.2806,
+    "b1_sampling_seconds": 0.034778300003381446,
+    "bank_generation_seconds": 0.6272380000009434,
+    "bank_reuse_count": 5,
+    "bank_size": 1403,
+    "candidate_array_conversion_seconds": 0.11080829999991693,
+    "candidate_cache_hit_rate": 0.8333333333333334,
+    "candidate_count": 10000,
+    "candidate_generation_seconds": 1.9335670000000391,
+    "checkpoint_write_seconds": 0.03861519999918528,
+    "evaluation_mode": "raw_observation",
+    "final_object_construction_seconds": 0.0011739000183297321,
+    "history_slice_seconds": 0.0004195000074105337,
+    "observation_serialization_seconds": 0.00045530000352300704,
+    "peak_memory_mb": 352.08984375,
+    "portfolio_index_bank_seconds": 0.03761950001353398,
+    "process_id": 45072,
+    "raw_evaluation_seconds": 0.00024160000612027943,
+    "score_view_seconds": 0.09990040001866873,
+    "seed": 20260000,
+    "target_issue": "08013",
+    "target_total_seconds": 3.182390600006329,
+    "vectorized_scoring_seconds": 0.0005056999943917617
+  }
+}

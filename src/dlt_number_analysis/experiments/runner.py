@@ -5,16 +5,27 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, time
+from os import getpid
 from pathlib import Path
 from time import perf_counter, process_time
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
-from dlt_number_analysis.backtesting import run_rolling_backtest
-from dlt_number_analysis.data import generate_history_integrity_report, validate_draw_dataframe
+from dlt_number_analysis.backtesting import (
+    evaluate_prediction_raw_observation,
+    run_rolling_backtest,
+)
+from dlt_number_analysis.data import (
+    CSV_COLUMNS,
+    DrawRecord,
+    generate_history_integrity_report,
+    validate_draw_dataframe,
+)
 from dlt_number_analysis.evaluation import IssuePrizeRecord, PrizeTable
+from dlt_number_analysis.experiments.benchmark_checkpoints import peak_process_memory_mb
 from dlt_number_analysis.experiments.shared_computation import (
     SharedComputationCache,
     build_shared_ablation_context,
@@ -49,6 +60,8 @@ from dlt_number_analysis.portfolio import (
 from dlt_number_analysis.scoring import build_number_scorer, uniform_score
 from dlt_number_analysis.strategies import StrategyFunction, core_rotation, max_coverage
 
+EvaluationMode = Literal["raw_observation", "full_resampling"]
+
 
 class ExperimentExecutionRecord(BaseModel):
     """Runtime and observation count for one experiment seed."""
@@ -76,12 +89,43 @@ class ExperimentExecutionRecord(BaseModel):
     final_object_construction_seconds: float = Field(default=0.0, ge=0)
 
 
+class TargetExecutionTiming(BaseModel):
+    """Measured phase timings for one target/seed shared Runner invocation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    target_issue: str = Field(pattern=r"^\d+$")
+    seed: int
+    evaluation_mode: EvaluationMode
+    history_slice_seconds: float = Field(ge=0)
+    candidate_generation_seconds: float = Field(ge=0)
+    candidate_array_conversion_seconds: float = Field(ge=0)
+    bank_generation_seconds: float = Field(ge=0)
+    portfolio_index_bank_seconds: float = Field(ge=0)
+    b1_sampling_seconds: float = Field(ge=0)
+    score_view_seconds: float = Field(ge=0)
+    vectorized_scoring_seconds: float = Field(ge=0)
+    final_object_construction_seconds: float = Field(ge=0)
+    raw_evaluation_seconds: float = Field(ge=0)
+    observation_serialization_seconds: float = Field(ge=0)
+    checkpoint_write_seconds: float = Field(default=0.0, ge=0)
+    target_total_seconds: float = Field(ge=0)
+    candidate_count: int = Field(ge=1)
+    bank_size: int = Field(ge=1)
+    acceptance_rate: float = Field(gt=0, le=1)
+    candidate_cache_hit_rate: float = Field(ge=0, le=1)
+    bank_reuse_count: int = Field(ge=0)
+    peak_memory_mb: float | None = Field(default=None, ge=0)
+    process_id: int = Field(ge=1)
+
+
 @dataclass(frozen=True, slots=True)
 class ExperimentBatchResult:
     """Tidy observations plus execution-level runtime records."""
 
     observations: pd.DataFrame
     executions: tuple[ExperimentExecutionRecord, ...]
+    target_timings: tuple[TargetExecutionTiming, ...] = ()
 
 
 def build_experiment_pipeline_config(
@@ -134,7 +178,9 @@ def _parameter_columns(spec: ExperimentSpec) -> dict[str, object]:
     parameters = spec.scorer_spec.parameters
     return {
         "scorer_name": spec.scorer_spec.name,
+        "scorer_spec_json": spec.scorer_spec.model_dump_json(),
         "portfolio_strategy": spec.portfolio_strategy,
+        "portfolio_constraints_json": spec.portfolio_constraints.model_dump_json(),
         "candidate_generation_method": spec.candidate_generation_method,
         "window": parameters.get("window"),
         "decay": parameters.get("decay"),
@@ -192,11 +238,14 @@ def _shared_bank_experiment_batch(
     minimum_bank_size: int = 500,
     maximum_bank_search_trials: int = 80_000,
     portfolio_scoring_method: PortfolioScoringMethod = "numpy_vectorized",
+    evaluation_mode: EvaluationMode = "full_resampling",
 ) -> ExperimentBatchResult:
     """Run B1-B6 target-first so candidates and feasible banks are truly shared."""
     del parallel_workers
+    if evaluation_mode not in {"raw_observation", "full_resampling"}:
+        raise ValueError(f"unsupported evaluation mode: {evaluation_mode}")
     if not specifications:
-        return ExperimentBatchResult(pd.DataFrame(), ())
+        return ExperimentBatchResult(pd.DataFrame(), (), ())
     allowed_ids = {f"B{index}" for index in range(1, 7)}
     is_ablation = all(
         spec.experiment_version == "v0.5.1-ablation-shared-v1" for spec in specifications
@@ -209,6 +258,8 @@ def _shared_bank_experiment_batch(
     if any(spec.seeds != first.seeds for spec in specifications):
         raise ValueError("shared bank experiments must use the same seed set")
     if first.data_split.phase == "final_holdout":
+        if evaluation_mode != "full_resampling":
+            raise ValueError("formal final holdout requires full_resampling evaluation")
         if holdout_lock_path is None:
             raise ValueError("formal final holdout requires a lock path")
         for spec in specifications:
@@ -241,6 +292,7 @@ def _shared_bank_experiment_batch(
     objective = PipelineConfig(profile=profile)
     observations: list[dict[str, object]] = []
     execution_rows: list[ExperimentExecutionRecord] = []
+    target_timing_rows: list[TargetExecutionTiming] = []
     config_hashes = {spec.experiment_id: experiment_config_sha256(spec) for spec in specifications}
     for seed in first.seeds:
         wall_started = perf_counter()
@@ -255,12 +307,16 @@ def _shared_bank_experiment_batch(
         vectorized_scoring_seconds = 0.0
         final_object_construction_seconds = 0.0
         for target_index in target_indices:
+            target_started = perf_counter()
+            history_started = perf_counter()
             history = validated.iloc[:target_index].copy()
+            target_history_slice_seconds = perf_counter() - history_started
             target_issue = str(validated.iloc[target_index]["issue"])
             generated_at = _historical_generation_time(history.iloc[-1]["draw_date"])
             candidate_seed = deterministic_subseed(seed, target_issue, "candidates")
             cache = SharedComputationCache()
             ablation_context = None
+            candidate_started = perf_counter()
             if is_ablation:
                 ablation_context = build_shared_ablation_context(
                     history,
@@ -292,9 +348,11 @@ def _shared_bank_experiment_batch(
                 candidate_requests += cache.candidate_requests
                 candidate_hits += cache.candidate_hits
                 base_pool = requested_pools[0]
+            target_candidate_generation_seconds = perf_counter() - candidate_started
             array_started = perf_counter()
             candidate_arrays = candidate_pool_to_array_bundle(base_pool)
-            candidate_array_conversion_seconds += perf_counter() - array_started
+            target_array_seconds = perf_counter() - array_started
+            candidate_array_conversion_seconds += target_array_seconds
             rescored: dict[tuple[str, float, float], CandidatePool] = {}
             score_views: dict[tuple[str, float, float], CandidateScoreView] = {}
             banks_by_signature: dict[str, FeasiblePortfolioBank] = {}
@@ -302,6 +360,12 @@ def _shared_bank_experiment_batch(
             predictions: dict[str, PredictionRecord] = {}
             audit_by_strategy: dict[str, dict[str, object]] = {}
             target_bank_reuse_count = 0
+            target_bank_generation_seconds = 0.0
+            target_index_bank_seconds = 0.0
+            target_b1_sampling_seconds = 0.0
+            target_score_view_seconds = 0.0
+            target_vectorized_scoring_seconds = 0.0
+            target_final_object_seconds = 0.0
             for spec in specifications:
                 signature = portfolio_constraints_signature(spec.portfolio_constraints)
                 bank_seed = deterministic_subseed(seed, target_issue, "bank", signature)
@@ -323,13 +387,16 @@ def _shared_bank_experiment_batch(
                     target_bank_reuse_count += 1
                 else:
                     banks_by_signature[signature] = bank
+                    target_bank_generation_seconds += bank.generation_seconds
                     if ablation_context is None:
                         bank_generation_seconds += bank.generation_seconds
                     index_started = perf_counter()
                     index_banks_by_signature[signature] = feasible_portfolio_bank_to_index_bank(
                         candidate_arrays, bank
                     )
-                    portfolio_index_bank_seconds += perf_counter() - index_started
+                    index_seconds = perf_counter() - index_started
+                    portfolio_index_bank_seconds += index_seconds
+                    target_index_bank_seconds += index_seconds
                 score_key = (
                     spec.scorer_spec.model_dump_json(),
                     spec.number_score_weight,
@@ -386,6 +453,7 @@ def _shared_bank_experiment_batch(
                     and portfolio_scoring_method == "numpy_vectorized"
                     and score_key not in score_views
                 ):
+                    score_view_started = perf_counter()
                     if ablation_context is None:
                         score_views[score_key] = build_candidate_score_view(
                             history,
@@ -416,15 +484,18 @@ def _shared_bank_experiment_batch(
                             structure_score_weight=spec.structure_score_weight,
                             scoring_method="shared_15x4_numpy_ablation_score_cube_view",
                         )
+                    target_score_view_seconds += perf_counter() - score_view_started
                 selection_seed = deterministic_subseed(
                     seed, target_issue, spec.experiment_id, "selection"
                 )
                 if spec.portfolio_strategy == "constraint_matched_random":
+                    b1_started = perf_counter()
                     selection = sample_constraint_matched_portfolio(
                         base_pool,
                         bank,
                         random_seed=selection_seed,
                     )
+                    target_b1_sampling_seconds += perf_counter() - b1_started
                     active_scoring_method = "random_bank_sample"
                 elif portfolio_scoring_method == "numpy_vectorized":
                     vectorized_result = score_portfolio_bank_vectorized(
@@ -439,7 +510,13 @@ def _shared_bank_experiment_batch(
                     )
                     selection = vectorized_result.selection
                     vectorized_scoring_seconds += vectorized_result.vectorized_scoring_seconds
+                    target_vectorized_scoring_seconds += (
+                        vectorized_result.vectorized_scoring_seconds
+                    )
                     final_object_construction_seconds += (
+                        vectorized_result.final_object_construction_seconds
+                    )
+                    target_final_object_seconds += (
                         vectorized_result.final_object_construction_seconds
                     )
                     active_scoring_method = "numpy_vectorized"
@@ -464,6 +541,7 @@ def _shared_bank_experiment_batch(
                         "parameters": {
                             **base_prediction.parameters,
                             "experiment_config_sha256": config_hashes[spec.experiment_id],
+                            "evaluation_mode": evaluation_mode,
                             "scorer_spec": spec.scorer_spec.model_dump(mode="json"),
                             "number_score_weight": spec.number_score_weight,
                             "structure_score_weight": spec.structure_score_weight,
@@ -508,26 +586,47 @@ def _shared_bank_experiment_batch(
                         "target_candidate_reuse_count": cache.candidate_hits,
                         "target_bank_generation_count": target_bank_generation_count,
                         "target_portfolio_bank_reuse_count": target_bank_reuse_count,
+                        "evaluation_mode": evaluation_mode,
                     }
                 )
-            strategies = {
-                name: _prediction_strategy(prediction) for name, prediction in predictions.items()
-            }
-            prefix = validated.iloc[: target_index + 1].copy()
-            report = run_rolling_backtest(
-                prefix,
-                strategies=strategies,
-                min_history=target_index,
-                base_random_seed=seed,
-                prize_tables=prize_tables,
-                issue_prize_records=issue_prize_records,
-                number_scorer=uniform_score,
-                number_scorer_name="uniform_score_for_precomputed_bank_predictions",
-                random_baseline_seed_count=random_baseline_seed_count,
-                bootstrap_resamples=bootstrap_resamples,
-                allow_short_history=minimum_history < 100,
-            )
-            results_by_name = {result.strategy_name: result for result in report.results}
+            raw_evaluation_seconds = 0.0
+            if evaluation_mode == "full_resampling":
+                strategies = {
+                    name: _prediction_strategy(prediction)
+                    for name, prediction in predictions.items()
+                }
+                prefix = validated.iloc[: target_index + 1].copy()
+                report = run_rolling_backtest(
+                    prefix,
+                    strategies=strategies,
+                    min_history=target_index,
+                    base_random_seed=seed,
+                    prize_tables=prize_tables,
+                    issue_prize_records=issue_prize_records,
+                    number_scorer=uniform_score,
+                    number_scorer_name="uniform_score_for_precomputed_bank_predictions",
+                    random_baseline_seed_count=random_baseline_seed_count,
+                    bootstrap_resamples=bootstrap_resamples,
+                    allow_short_history=minimum_history < 100,
+                )
+                results_by_name = {result.strategy_name: result for result in report.results}
+            else:
+                target_row = validated.iloc[target_index]
+                actual_draw = DrawRecord.model_validate(
+                    {column: target_row[column] for column in CSV_COLUMNS}
+                )
+                raw_started = perf_counter()
+                results_by_name = {
+                    strategy_name: evaluate_prediction_raw_observation(
+                        prediction,
+                        actual_draw,
+                        prize_tables=prize_tables,
+                        issue_prize_records=issue_prize_records,
+                    )
+                    for strategy_name, prediction in predictions.items()
+                }
+                raw_evaluation_seconds = perf_counter() - raw_started
+            serialization_started = perf_counter()
             for spec in specifications:
                 strategy_name = f"experiment_{spec.experiment_id}"
                 result = results_by_name[strategy_name]
@@ -538,15 +637,48 @@ def _shared_bank_experiment_batch(
                         "experiment_version": spec.experiment_version,
                         "experiment_config_sha256": config_hashes[spec.experiment_id],
                         "phase": spec.data_split.phase,
+                        "evaluation_mode": evaluation_mode,
+                        "profile": profile,
                         "cohort_id": cohort_id,
                         "seed": seed,
                         "prediction_random_seed": predictions[strategy_name].random_seed,
+                        "prediction_model_version": predictions[strategy_name].model_version,
+                        "candidate_count": len(base_pool.candidates),
                         "draw_date": validated.iloc[target_index]["draw_date"],
                         **_parameter_columns(spec),
                         **audit_by_strategy[strategy_name],
                         **result.model_dump(mode="python"),
                     }
                 )
+            serialization_seconds = perf_counter() - serialization_started
+            bank_values = tuple(banks_by_signature.values())
+            peak_memory, _ = peak_process_memory_mb()
+            target_timing_rows.append(
+                TargetExecutionTiming(
+                    target_issue=target_issue,
+                    seed=seed,
+                    evaluation_mode=evaluation_mode,
+                    history_slice_seconds=target_history_slice_seconds,
+                    candidate_generation_seconds=target_candidate_generation_seconds,
+                    candidate_array_conversion_seconds=target_array_seconds,
+                    bank_generation_seconds=target_bank_generation_seconds,
+                    portfolio_index_bank_seconds=target_index_bank_seconds,
+                    b1_sampling_seconds=target_b1_sampling_seconds,
+                    score_view_seconds=target_score_view_seconds,
+                    vectorized_scoring_seconds=target_vectorized_scoring_seconds,
+                    final_object_construction_seconds=target_final_object_seconds,
+                    raw_evaluation_seconds=raw_evaluation_seconds,
+                    observation_serialization_seconds=serialization_seconds,
+                    target_total_seconds=perf_counter() - target_started,
+                    candidate_count=len(base_pool.candidates),
+                    bank_size=min(bank.bank_size for bank in bank_values),
+                    acceptance_rate=min(bank.acceptance_rate for bank in bank_values),
+                    candidate_cache_hit_rate=cache.candidate_cache_hit_rate,
+                    bank_reuse_count=target_bank_reuse_count,
+                    peak_memory_mb=peak_memory,
+                    process_id=getpid(),
+                )
+            )
         wall_seconds = perf_counter() - wall_started
         cpu_seconds = process_time() - cpu_started
         cache_hit_rate = 0.0 if candidate_requests == 0 else candidate_hits / candidate_requests
@@ -590,7 +722,7 @@ def _shared_bank_experiment_batch(
                 experiment_version=spec.experiment_version,
                 result_bytes=result_bytes,
             )
-    return ExperimentBatchResult(frame, tuple(execution_rows))
+    return ExperimentBatchResult(frame, tuple(execution_rows), tuple(target_timing_rows))
 
 
 def _run_legacy_experiment(
@@ -714,6 +846,7 @@ def run_experiment(
     minimum_bank_size: int = 500,
     maximum_bank_search_trials: int = 80_000,
     portfolio_scoring_method: PortfolioScoringMethod = "numpy_vectorized",
+    evaluation_mode: EvaluationMode = "full_resampling",
 ) -> ExperimentBatchResult:
     """Run one experiment, routing B1-B6 through the shared feasible-bank path."""
     options = {
@@ -736,8 +869,11 @@ def run_experiment(
             minimum_bank_size=minimum_bank_size,
             maximum_bank_search_trials=maximum_bank_search_trials,
             portfolio_scoring_method=portfolio_scoring_method,
+            evaluation_mode=evaluation_mode,
             **options,
         )
+    if evaluation_mode != "full_resampling":
+        raise ValueError("raw_observation evaluation is supported only by shared B1-B6")
     if target_issues is not None:
         raise ValueError("target_issues filtering is currently restricted to B1-B6")
     return _run_legacy_experiment(draws, spec, **options)
@@ -751,6 +887,7 @@ def run_experiment_batch(
     """Run multiple specs and combine tidy results without changing their configs."""
     observations: list[pd.DataFrame] = []
     executions: list[ExperimentExecutionRecord] = []
+    target_timings: list[TargetExecutionTiming] = []
     shared_ids = {f"B{index}" for index in range(1, 7)}
     shared = [spec for spec in specifications if spec.experiment_id in shared_ids]
     ablations = [
@@ -768,9 +905,15 @@ def run_experiment_batch(
         result = _shared_bank_experiment_batch(draws, shared_group, **run_options)
         observations.append(result.observations)
         executions.extend(result.executions)
+        target_timings.extend(result.target_timings)
     for spec in legacy:
         result = run_experiment(draws, spec, **run_options)
         observations.append(result.observations)
         executions.extend(result.executions)
+        target_timings.extend(result.target_timings)
     combined = pd.concat(observations, ignore_index=True) if observations else pd.DataFrame()
-    return ExperimentBatchResult(observations=combined, executions=tuple(executions))
+    return ExperimentBatchResult(
+        observations=combined,
+        executions=tuple(executions),
+        target_timings=tuple(target_timings),
+    )

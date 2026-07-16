@@ -156,6 +156,11 @@ def _peak_process_memory_mb() -> tuple[float | None, str | None]:
         return None, f"{type(error).__name__}: {error}"
 
 
+def peak_process_memory_mb() -> tuple[float | None, str | None]:
+    """Return process peak memory for production benchmark audit records."""
+    return _peak_process_memory_mb()
+
+
 def _resolve_worker(worker_path: str) -> Callable[..., Mapping[str, object]]:
     module_name, separator, function_name = worker_path.partition(":")
     if not separator:

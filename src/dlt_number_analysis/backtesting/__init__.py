@@ -7,11 +7,13 @@ from dlt_number_analysis.backtesting.models import (
     ConfidenceInterval,
     RandomBaselineSummary,
     RandomMetricSummary,
+    RawObservationResult,
 )
 from dlt_number_analysis.backtesting.rolling import (
     MissingPrizeAmountError,
     calculate_raw_hit_metrics,
     clear_random_baseline_cache,
+    evaluate_prediction_raw_observation,
     random_baseline_cache_info,
     run_rolling_backtest,
 )
@@ -24,8 +26,10 @@ __all__ = [
     "MissingPrizeAmountError",
     "RandomBaselineSummary",
     "RandomMetricSummary",
+    "RawObservationResult",
     "calculate_raw_hit_metrics",
     "clear_random_baseline_cache",
+    "evaluate_prediction_raw_observation",
     "random_baseline_cache_info",
     "run_rolling_backtest",
 ]

@@ -11,7 +11,7 @@ from pydantic import JsonValue
 
 from dlt_number_analysis import DISCLAIMER
 from dlt_number_analysis.data import load_prize_rule_schedule, load_verified_history
-from dlt_number_analysis.experiments.runner import run_experiment_batch
+from dlt_number_analysis.experiments.runner import EvaluationMode, run_experiment_batch
 from dlt_number_analysis.experiments.scheduler import ExperimentProcessTask
 from dlt_number_analysis.pipeline import PipelineProfile
 from dlt_number_analysis.portfolio import PortfolioScoringMethod
@@ -39,6 +39,10 @@ def execute_experiment_process_task(
         minimum_history=int(parameters.get("minimum_history", 100)),
         random_baseline_seed_count=int(parameters.get("random_baseline_seed_count", 1000)),
         bootstrap_resamples=int(parameters.get("bootstrap_resamples", 1000)),
+        evaluation_mode=cast(
+            EvaluationMode,
+            str(parameters.get("evaluation_mode", "full_resampling")),
+        ),
         minimum_bank_size=int(parameters.get("minimum_bank_size", 500)),
         maximum_bank_search_trials=int(parameters.get("maximum_bank_search_trials", 80_000)),
         portfolio_scoring_method=cast(
@@ -60,5 +64,6 @@ def execute_experiment_process_task(
             force_ascii=False,
         ),
         "executions": [execution.model_dump(mode="json") for execution in result.executions],
+        "target_timings": [timing.model_dump(mode="json") for timing in result.target_timings],
         "risk_disclaimer": DISCLAIMER,
     }
