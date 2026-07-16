@@ -11,7 +11,13 @@ from typing import cast
 import pandas as pd
 
 from dlt_number_analysis import DISCLAIMER
-from dlt_number_analysis.data import load_verified_history
+from dlt_number_analysis.data import load_prize_rule_schedule, load_verified_history
+from dlt_number_analysis.experiments.identity import (
+    ExperimentExecutionIdentity,
+    RunContextIdentity,
+    build_experiment_execution_identity,
+    build_run_context_identity,
+)
 from dlt_number_analysis.experiments.reporting import (
     compare_to_constraint_matched_baseline,
     write_ablation_results_csv,
@@ -37,8 +43,12 @@ from dlt_number_analysis.experiments.stages import (
     build_staged_ablation_plan,
     select_stage_target_issues,
 )
-from dlt_number_analysis.experiments.storage import EXPERIMENT_PRIMARY_KEY, ExperimentResultStore
+from dlt_number_analysis.experiments.storage import (
+    ExperimentResultStoreV2,
+    LegacyObservationImportStore,
+)
 from dlt_number_analysis.experiments.worker import execute_experiment_process_task
+from dlt_number_analysis.pipeline import PROFILE_DEFAULTS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -95,12 +105,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--legacy-observations",
         type=Path,
         default=PROJECT_ROOT / "outputs/backtests/v05_observations.csv",
-        help="one-time source migrated into immutable Parquet partitions",
+        help="source used only with --migrate-legacy-observations",
+    )
+    parser.add_argument(
+        "--migrate-legacy-observations",
+        action="store_true",
+        help="explicitly import old CSV rows as legacy_unverified, never as formal results",
+    )
+    parser.add_argument(
+        "--legacy-import-root",
+        type=Path,
+        default=PROJECT_ROOT / "outputs/experiments/legacy_import",
     )
     parser.add_argument(
         "--results-root",
         type=Path,
-        default=PROJECT_ROOT / "outputs/experiments",
+        default=PROJECT_ROOT / "outputs/experiments/schema_v2",
     )
     parser.add_argument(
         "--summary-output",
@@ -195,15 +215,23 @@ def _expected_targets(
 
 
 def _pending_groups(
-    store: ExperimentResultStore,
+    store: ExperimentResultStoreV2,
     specifications: tuple[ExperimentSpec, ...],
     targets_by_experiment: dict[str, tuple[str, ...]],
+    identities_by_experiment: dict[str, ExperimentExecutionIdentity],
+    contexts_by_experiment: dict[str, RunContextIdentity],
 ) -> dict[tuple[int, tuple[str, ...]], list[ExperimentSpec]]:
     groups: dict[tuple[int, tuple[str, ...]], list[ExperimentSpec]] = defaultdict(list)
     for spec in specifications:
         expected = targets_by_experiment[spec.experiment_id]
         for seed in spec.seeds:
-            status = store.status(spec, seed=seed, expected_target_issues=expected)
+            status = store.status(
+                spec,
+                seed=seed,
+                expected_target_issues=expected,
+                identity=identities_by_experiment[spec.experiment_id],
+                run_context=contexts_by_experiment[spec.experiment_id],
+            )
             if status.is_complete:
                 print(f"skip completed: {spec.data_split.phase}/{spec.experiment_id}/seed_{seed}")
                 continue
@@ -241,36 +269,6 @@ def _ablation_status_rows(observations: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_records(rows)
 
 
-def _migrate_legacy_observations(
-    store: ExperimentResultStore,
-    legacy_path: Path,
-) -> int:
-    """Append only legacy keys not already present; never rewrite or delete the source CSV."""
-    if not legacy_path.exists():
-        return 0
-    legacy = pd.read_csv(
-        legacy_path,
-        dtype={"target_issue": "string", "data_cutoff_issue": "string"},
-    )
-    if legacy.duplicated(list(EXPERIMENT_PRIMARY_KEY)).any():
-        raise ValueError("legacy observations contain duplicate experiment primary keys")
-    existing = store.load_all()
-    if existing.empty:
-        pending = legacy
-    else:
-        keys = existing.loc[:, list(EXPERIMENT_PRIMARY_KEY)].drop_duplicates()
-        marked = legacy.merge(
-            keys.assign(_already_stored=True),
-            on=list(EXPERIMENT_PRIMARY_KEY),
-            how="left",
-        )
-        pending = marked.loc[marked["_already_stored"].isna()].drop(columns="_already_stored")
-    if pending.empty:
-        return 0
-    store.append(pending)
-    return len(pending)
-
-
 def _frames_from_scheduler_results(
     report: ProcessSchedulerReport,
 ) -> list[pd.DataFrame]:
@@ -290,10 +288,14 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     draws = load_verified_history(args.draws)
     specifications = _selected_specifications(args)
-    store = ExperimentResultStore(args.results_root)
-    migrated = _migrate_legacy_observations(store, args.legacy_observations)
-    if migrated:
-        print(f"migrated legacy observations: {migrated}")
+    store = ExperimentResultStoreV2(args.results_root)
+    if args.migrate_legacy_observations:
+        if not args.legacy_observations.exists():
+            raise ValueError(f"legacy observations do not exist: {args.legacy_observations}")
+        migrated = LegacyObservationImportStore(args.legacy_import_root).import_csv(
+            args.legacy_observations
+        )
+        print(f"imported legacy_unverified observations: {migrated}")
     targets_by_experiment = {
         spec.experiment_id: _expected_targets(
             draws,
@@ -304,19 +306,54 @@ def main(argv: list[str] | None = None) -> int:
         )
         for spec in specifications
     }
+    final_holdout = specifications[0].data_split.phase == "final_holdout"
+    evaluation_mode = args.evaluation_mode or (
+        "full_resampling" if final_holdout else "raw_observation"
+    )
+    if final_holdout and evaluation_mode != "full_resampling":
+        raise ValueError("final_holdout requires full_resampling evaluation")
+    prize_tables = load_prize_rule_schedule(PROJECT_ROOT / "config/prize_tiers.json").tables
+    identities_by_experiment: dict[str, ExperimentExecutionIdentity] = {}
+    contexts_by_experiment: dict[str, RunContextIdentity] = {}
+    for spec in specifications:
+        uses_shared_bank = spec.experiment_id in {f"B{index}" for index in range(1, 7)} or (
+            spec.experiment_version == "v0.5.1-ablation-shared-v1"
+        )
+        run_context = build_run_context_identity(
+            draws,
+            data_split_spec=spec.data_split,
+            phase=spec.data_split.phase,
+            evaluation_mode=evaluation_mode,
+            profile=args.profile,
+            portfolio_scoring_method=(
+                args.portfolio_scoring_method if uses_shared_bank else "object_reference"
+            ),
+            minimum_history=args.minimum_history,
+            minimum_bank_size=args.minimum_bank_size if uses_shared_bank else 1,
+            maximum_bank_search_trials=(
+                args.maximum_bank_search_trials
+                if uses_shared_bank
+                else PROFILE_DEFAULTS[args.profile]["optimizer_search_trials"]
+            ),
+            prize_tables=prize_tables,
+            worker_count=args.workers,
+            target_issues=args.target_issues,
+        )
+        identities_by_experiment[spec.experiment_id] = build_experiment_execution_identity(
+            run_context, spec
+        )
+        contexts_by_experiment[spec.experiment_id] = run_context
     failures = False
     if not args.report_only:
         for (seed, targets), grouped_specs in _pending_groups(
-            store, specifications, targets_by_experiment
+            store,
+            specifications,
+            targets_by_experiment,
+            identities_by_experiment,
+            contexts_by_experiment,
         ).items():
             if not targets:
                 continue
-            final_holdout = grouped_specs[0].data_split.phase == "final_holdout"
-            evaluation_mode = args.evaluation_mode or (
-                "full_resampling" if final_holdout else "raw_observation"
-            )
-            if final_holdout and evaluation_mode != "full_resampling":
-                raise ValueError("final_holdout requires full_resampling evaluation")
             tasks = build_process_tasks(
                 grouped_specs,
                 targets,
@@ -349,7 +386,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             for frame in _frames_from_scheduler_results(report):
                 if not frame.empty:
-                    store.append(frame)
+                    store.append(
+                        frame,
+                        expected_target_issues_by_experiment=targets_by_experiment,
+                    )
             failures = failures or bool(report.failed_tasks)
     observations = store.load_all()
     comparisons = compare_to_constraint_matched_baseline(observations)

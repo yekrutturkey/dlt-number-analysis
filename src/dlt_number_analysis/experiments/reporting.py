@@ -36,6 +36,10 @@ class ExperimentComparison(BaseModel):
 
     phase: str
     cohort_id: str
+    run_context_sha256: str = "unknown"
+    history_sha256: str = "unknown"
+    evaluation_mode: str = "unknown"
+    profile: str = "unknown"
     target_start_issue: str
     target_end_issue: str
     common_target_count: int = Field(ge=1)
@@ -68,6 +72,48 @@ class RawObservationStatistics:
     baseline_comparisons: tuple[ExperimentComparison, ...]
 
 
+_REPORT_CONTEXT_COLUMNS: tuple[str, ...] = (
+    "phase",
+    "cohort_id",
+    "run_context_sha256",
+    "history_sha256",
+    "evaluation_mode",
+    "profile",
+)
+
+
+def _formal_observations(observations: pd.DataFrame) -> pd.DataFrame:
+    """Exclude explicitly unverified legacy imports from formal statistics."""
+    result = observations.copy()
+    if "formal_inference_eligible" in result:
+        result = result.loc[result["formal_inference_eligible"].fillna(False).astype(bool)].copy()
+    if "identity_status" in result:
+        result = result.loc[result["identity_status"].astype(str) != "legacy_unverified"].copy()
+    return result
+
+
+def _ensure_report_identity_columns(observations: pd.DataFrame) -> pd.DataFrame:
+    result = observations.copy()
+    defaults = {
+        "run_context_sha256": "unknown",
+        "history_sha256": "unknown",
+        "evaluation_mode": "unknown",
+        "profile": "unknown",
+        "experiment_config_sha256": "unknown",
+        "execution_config_sha256": "unknown",
+        "execution_identity_schema_version": "unknown",
+        "formal_inference_eligible": True,
+    }
+    for column, default in defaults.items():
+        if column not in result:
+            result[column] = default
+        elif isinstance(default, bool):
+            result[column] = result[column].fillna(default).astype(bool)
+        else:
+            result[column] = result[column].fillna(default).astype(str)
+    return result
+
+
 def summarize_raw_observation_partitions(
     observations: pd.DataFrame,
     *,
@@ -76,6 +122,7 @@ def summarize_raw_observation_partitions(
     minimum_paired_observations: int = 30,
 ) -> RawObservationStatistics:
     """Run statistics from raw rows only, without any prediction-generation dependency."""
+    observations = _formal_observations(observations)
     if observations.empty:
         return RawObservationStatistics(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), ())
     if "evaluation_mode" not in observations:
@@ -83,12 +130,13 @@ def summarize_raw_observation_partitions(
     modes = set(observations["evaluation_mode"].astype(str))
     if modes != {"raw_observation"}:
         raise ValueError("raw statistics accept only raw_observation partitions")
+    annotated = assign_observation_cohorts(observations)
     return RawObservationStatistics(
-        experiment_summary=summarize_observations(observations),
-        performance_by_year=performance_by_year(observations),
-        performance_by_seed=performance_by_seed(observations),
+        experiment_summary=summarize_observations(annotated),
+        performance_by_year=performance_by_year(annotated),
+        performance_by_seed=performance_by_seed(annotated),
         baseline_comparisons=compare_to_constraint_matched_baseline(
-            observations,
+            annotated,
             bootstrap_resamples=bootstrap_resamples,
             permutations=permutations,
             minimum_paired_observations=minimum_paired_observations,
@@ -108,7 +156,7 @@ def assign_observation_cohorts(observations: pd.DataFrame) -> pd.DataFrame:
     missing = required.difference(observations.columns)
     if missing:
         raise ValueError(f"experiment observations are missing cohort fields: {sorted(missing)}")
-    annotated = observations.copy()
+    annotated = _ensure_report_identity_columns(_formal_observations(observations))
     annotated["target_issue"] = annotated["target_issue"].astype(str)
     if "experiment_version" not in annotated:
         annotated["experiment_version"] = "unknown"
@@ -135,16 +183,27 @@ def assign_observation_cohorts(observations: pd.DataFrame) -> pd.DataFrame:
     remaining = annotated.loc[annotated["cohort_id"].eq("")]
     if remaining.empty:
         return annotated
-    group_columns = ["phase", "experiment_id", "experiment_version", "seed"]
+    group_columns = [
+        "phase",
+        "run_context_sha256",
+        "history_sha256",
+        "evaluation_mode",
+        "profile",
+        "experiment_id",
+        "experiment_version",
+        "seed",
+    ]
     target_sets = {
         key: _issue_tuple(group["target_issue"])
         for key, group in remaining.groupby(group_columns, sort=True, dropna=False)
     }
-    signatures_by_phase: dict[str, set[tuple[str, ...]]] = {}
+    signatures_by_phase: dict[tuple[str, str, str, str, str], set[tuple[str, ...]]] = {}
     for key, targets in target_sets.items():
-        signatures_by_phase.setdefault(str(key[0]), set()).add(targets)
-    cohort_by_signature: dict[tuple[str, tuple[str, ...]], str] = {}
-    for phase, signatures in signatures_by_phase.items():
+        context = tuple(str(value) for value in key[:5])
+        signatures_by_phase.setdefault(context, set()).add(targets)
+    cohort_by_signature: dict[tuple[tuple[str, str, str, str, str], tuple[str, ...]], str] = {}
+    for context, signatures in signatures_by_phase.items():
+        phase = context[0]
         largest = max((len(signature) for signature in signatures), default=0)
         largest_signatures = [signature for signature in signatures if len(signature) == largest]
         for signature in signatures:
@@ -157,28 +216,45 @@ def assign_observation_cohorts(observations: pd.DataFrame) -> pd.DataFrame:
                 }.get(phase, f"{phase}_full")
             else:
                 cohort = f"{phase}_partial_{start}_{end}_{len(signature)}"
-            cohort_by_signature[(phase, signature)] = cohort
+            cohort_by_signature[(context, signature)] = cohort
     for key, targets in target_sets.items():
-        phase, experiment_id, experiment_version, seed = key
+        (
+            phase,
+            run_hash,
+            history_hash,
+            evaluation_mode,
+            profile,
+            experiment_id,
+            experiment_version,
+            seed,
+        ) = key
         mask = (
             annotated["cohort_id"].eq("")
             & annotated["phase"].eq(phase)
+            & annotated["run_context_sha256"].eq(run_hash)
+            & annotated["history_sha256"].eq(history_hash)
+            & annotated["evaluation_mode"].eq(evaluation_mode)
+            & annotated["profile"].eq(profile)
             & annotated["experiment_id"].eq(experiment_id)
             & annotated["experiment_version"].eq(experiment_version)
             & annotated["seed"].eq(seed)
         )
-        annotated.loc[mask, "cohort_id"] = cohort_by_signature[(str(phase), targets)]
+        context = tuple(str(value) for value in key[:5])
+        annotated.loc[mask, "cohort_id"] = cohort_by_signature[(context, targets)]
     return annotated
 
 
-def _cohort_common_target_counts(observations: pd.DataFrame) -> dict[str, int]:
-    common: dict[str, int] = {}
-    for cohort_id, cohort in observations.groupby("cohort_id", sort=True):
+def _cohort_common_target_counts(
+    observations: pd.DataFrame,
+) -> dict[tuple[str, str, str, str, str, str], int]:
+    common: dict[tuple[str, str, str, str, str, str], int] = {}
+    for raw_key, cohort in observations.groupby(list(_REPORT_CONTEXT_COLUMNS), sort=True):
         target_sets = [
             set(group["target_issue"].astype(str))
             for _, group in cohort.groupby("experiment_id", sort=True)
         ]
-        common[str(cohort_id)] = len(set.intersection(*target_sets)) if target_sets else 0
+        key = tuple(str(value) for value in raw_key)
+        common[key] = len(set.intersection(*target_sets)) if target_sets else 0
     return common
 
 
@@ -199,9 +275,17 @@ def summarize_observations(observations: pd.DataFrame) -> pd.DataFrame:
         "roi",
     ):
         numeric[column] = pd.to_numeric(numeric[column], errors="coerce")
-    return (
+    summary = (
         numeric.groupby(
-            ["phase", "cohort_id", "experiment_id", "experiment_version"],
+            [
+                *_REPORT_CONTEXT_COLUMNS,
+                "experiment_id",
+                "experiment_version",
+                "experiment_config_sha256",
+                "execution_config_sha256",
+                "execution_identity_schema_version",
+                "formal_inference_eligible",
+            ],
             sort=True,
             dropna=False,
         )
@@ -222,8 +306,12 @@ def summarize_observations(observations: pd.DataFrame) -> pd.DataFrame:
             roi_period_count=("roi", "count"),
         )
         .reset_index()
-        .assign(common_target_count=lambda frame: frame["cohort_id"].map(common_counts).astype(int))
     )
+    summary["common_target_count"] = [
+        common_counts[tuple(str(row[column]) for column in _REPORT_CONTEXT_COLUMNS)]
+        for row in summary.to_dict(orient="records")
+    ]
+    return summary
 
 
 def compare_to_constraint_matched_baseline(
@@ -239,16 +327,29 @@ def compare_to_constraint_matched_baseline(
     if minimum_paired_observations < 2:
         raise ValueError("minimum_paired_observations must be at least 2")
     comparisons: list[ExperimentComparison] = []
+    observations = _formal_observations(observations)
     if observations.empty:
         return ()
     annotated = assign_observation_cohorts(observations)
-    for (phase, cohort_id), phase_frame in annotated.groupby(["phase", "cohort_id"], sort=True):
+    for raw_context, phase_frame in annotated.groupby(list(_REPORT_CONTEXT_COLUMNS), sort=True):
+        (
+            phase,
+            cohort_id,
+            run_context_sha256,
+            history_sha256,
+            evaluation_mode,
+            profile,
+        ) = (str(value) for value in raw_context)
         baseline = phase_frame.loc[phase_frame["experiment_id"] == baseline_id]
         if baseline.empty:
             continue
+        if baseline.duplicated(["target_issue", "seed"]).any():
+            raise ValueError("baseline contains mixed experiment identities in one run context")
         for experiment_id, strategy in phase_frame.groupby("experiment_id", sort=True):
             if experiment_id == baseline_id:
                 continue
+            if strategy.duplicated(["target_issue", "seed"]).any():
+                raise ValueError("strategy contains mixed experiment identities in one run context")
             differences = paired_metric_differences(strategy, baseline)
             for metric in METRIC_SOURCE_COLUMNS:
                 values = differences.loc[
@@ -271,6 +372,10 @@ def compare_to_constraint_matched_baseline(
                     ExperimentComparison(
                         phase=str(phase),
                         cohort_id=str(cohort_id),
+                        run_context_sha256=run_context_sha256,
+                        history_sha256=history_sha256,
+                        evaluation_mode=evaluation_mode,
+                        profile=profile,
                         target_start_issue=str(
                             min(differences["target_issue"].astype(str), key=int)
                         ),
@@ -288,12 +393,29 @@ def compare_to_constraint_matched_baseline(
                     )
                 )
     corrected: list[ExperimentComparison] = []
-    families = sorted({(comparison.phase, comparison.cohort_id) for comparison in comparisons})
-    for phase, cohort_id in families:
+    families = sorted(
+        {
+            (
+                comparison.phase,
+                comparison.cohort_id,
+                comparison.run_context_sha256,
+                comparison.history_sha256,
+                comparison.evaluation_mode,
+                comparison.profile,
+            )
+            for comparison in comparisons
+        }
+    )
+    for phase, cohort_id, run_hash, history_hash, evaluation_mode, profile in families:
         family = [
             comparison
             for comparison in comparisons
-            if comparison.phase == phase and comparison.cohort_id == cohort_id
+            if comparison.phase == phase
+            and comparison.cohort_id == cohort_id
+            and comparison.run_context_sha256 == run_hash
+            and comparison.history_sha256 == history_hash
+            and comparison.evaluation_mode == evaluation_mode
+            and comparison.profile == profile
         ]
         p_values = [comparison.permutation_p_value for comparison in family]
         holm = adjust_p_values_holm(p_values)

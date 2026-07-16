@@ -1,5 +1,33 @@
 # dlt-number-analysis
 
+## v0.5.5: formal experiment identity and schema_v2 isolation
+
+Formal observations now use two audit identities. `run_context_sha256` binds the frozen
+canonical history, concrete chronological split boundaries, phase, evaluation semantics,
+expanded profile, requested Portfolio scoring path, bank limits, scoring implementation and
+prize-data hashes. It deliberately excludes experiment specifications, target chunks, worker
+count, host, wall-clock data and Git SHA. Each ExperimentSpec then receives
+`execution_config_sha256 = sha256(run_context_sha256 + experiment_config_sha256)`.
+
+New results are stored below
+`outputs/experiments/schema_v2/{phase}/{experiment_id}/{experiment_version}/<run-hash>/<execution-hash>/seed_<seed>/`.
+Every partition contains an atomically written Parquet file and a matching manifest. Resume
+status requires the full ExperimentSpec, execution identity and run context; old v0.5.1 flat
+partitions cannot complete a v0.5.5 task. The CLI never migrates legacy CSV implicitly.
+`--migrate-legacy-observations` imports it only into `outputs/experiments/legacy_import` as
+`legacy_unverified` and excludes it from formal statistics.
+
+The bounded correctness entry point runs only the dynamically selected first eligible, median
+and last development targets with B1-B6, seed 20260000, fast/raw/NumPy and one process:
+
+```powershell
+uv run python scripts/run_v055_identity_smoke.py
+uv run python scripts/run_v055_identity_smoke.py --resume-check-only
+```
+
+This smoke validates identity, storage and read-only resume behavior only. It is not used for
+parameter selection or a strategy-advantage claim. 评分不等于真实中奖概率，彩票开奖结果是随机事件。
+
 ## v0.5.4：正式批量 Runner 的 raw observation 模式
 
 共享 B1–B6 Runner 现在显式支持 `raw_observation` 与 `full_resampling`。前者只对已经生成的

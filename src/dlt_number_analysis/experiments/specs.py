@@ -114,7 +114,7 @@ def baseline_experiment_specs(
         return ExperimentSpec(
             experiment_id=experiment_id,
             experiment_version=(
-                f"v0.5.1-{experiment_id.lower()}-shared-bank-v1"
+                f"v0.5.5-{experiment_id.lower()}-shared-bank-v2"
                 if bank_version
                 else f"v0.5-{experiment_id.lower()}-v1"
             ),

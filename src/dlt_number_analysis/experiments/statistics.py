@@ -243,12 +243,36 @@ def performance_by_year(results: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("performance-by-year requires draw_date")
     dated = results.copy()
     dated["year"] = pd.to_datetime(dated["draw_date"], errors="raise").dt.year
-    return _aggregate_performance(dated, ["experiment_id", "year"])
+    context = [
+        column
+        for column in (
+            "phase",
+            "cohort_id",
+            "run_context_sha256",
+            "history_sha256",
+            "evaluation_mode",
+            "profile",
+        )
+        if column in dated
+    ]
+    return _aggregate_performance(dated, [*context, "experiment_id", "year"])
 
 
 def performance_by_seed(results: pd.DataFrame) -> pd.DataFrame:
     """Aggregate strategy metrics independently for every experiment seed."""
-    return _aggregate_performance(results, ["experiment_id", "seed"])
+    context = [
+        column
+        for column in (
+            "phase",
+            "cohort_id",
+            "run_context_sha256",
+            "history_sha256",
+            "evaluation_mode",
+            "profile",
+        )
+        if column in results
+    ]
+    return _aggregate_performance(results, [*context, "experiment_id", "seed"])
 
 
 def parameter_sensitivity_report(

@@ -8,7 +8,6 @@ from datetime import datetime, time
 from os import getpid
 from pathlib import Path
 from time import perf_counter, process_time
-from typing import Literal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -26,6 +25,14 @@ from dlt_number_analysis.data import (
 )
 from dlt_number_analysis.evaluation import IssuePrizeRecord, PrizeTable
 from dlt_number_analysis.experiments.benchmark_checkpoints import peak_process_memory_mb
+from dlt_number_analysis.experiments.identity import (
+    EXECUTION_IDENTITY_SCHEMA_VERSION,
+    RUNNER_VERSION,
+    EvaluationMode,
+    build_experiment_execution_identity,
+    build_run_context_identity,
+    current_git_commit_sha,
+)
 from dlt_number_analysis.experiments.shared_computation import (
     SharedComputationCache,
     build_shared_ablation_context,
@@ -34,10 +41,10 @@ from dlt_number_analysis.experiments.shared_computation import (
 from dlt_number_analysis.experiments.specs import ExperimentSpec
 from dlt_number_analysis.experiments.splits import (
     acquire_holdout_lock,
-    experiment_config_sha256,
     finalize_holdout_lock,
     split_history,
 )
+from dlt_number_analysis.experiments.storage import STORAGE_SCHEMA_VERSION
 from dlt_number_analysis.models import PredictionRecord
 from dlt_number_analysis.pipeline import PROFILE_DEFAULTS, PipelineConfig, PipelineProfile
 from dlt_number_analysis.portfolio import (
@@ -60,8 +67,6 @@ from dlt_number_analysis.portfolio import (
 from dlt_number_analysis.scoring import build_number_scorer, uniform_score
 from dlt_number_analysis.strategies import StrategyFunction, core_rotation, max_coverage
 
-EvaluationMode = Literal["raw_observation", "full_resampling"]
-
 
 class ExperimentExecutionRecord(BaseModel):
     """Runtime and observation count for one experiment seed."""
@@ -71,6 +76,8 @@ class ExperimentExecutionRecord(BaseModel):
     experiment_id: str
     experiment_version: str
     experiment_config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    run_context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    execution_config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     phase: str
     seed: int
     period_count: int = Field(ge=0)
@@ -241,7 +248,6 @@ def _shared_bank_experiment_batch(
     evaluation_mode: EvaluationMode = "full_resampling",
 ) -> ExperimentBatchResult:
     """Run B1-B6 target-first so candidates and feasible banks are truly shared."""
-    del parallel_workers
     if evaluation_mode not in {"raw_observation", "full_resampling"}:
         raise ValueError(f"unsupported evaluation mode: {evaluation_mode}")
     if not specifications:
@@ -257,17 +263,41 @@ def _shared_bank_experiment_batch(
         raise ValueError("shared bank experiments must use the same temporal split")
     if any(spec.seeds != first.seeds for spec in specifications):
         raise ValueError("shared bank experiments must use the same seed set")
+    validated = validate_draw_dataframe(draws)
+    if generate_history_integrity_report(validated).blocks_backtest:
+        raise ValueError("history integrity errors block formal experiments")
+    run_context = build_run_context_identity(
+        validated,
+        data_split_spec=first.data_split,
+        phase=first.data_split.phase,
+        evaluation_mode=evaluation_mode,
+        profile=profile,
+        portfolio_scoring_method=portfolio_scoring_method,
+        minimum_history=minimum_history,
+        minimum_bank_size=minimum_bank_size,
+        maximum_bank_search_trials=maximum_bank_search_trials,
+        prize_tables=prize_tables,
+        issue_prize_records=issue_prize_records,
+        worker_count=parallel_workers,
+        target_issues=target_issues,
+    )
+    execution_identities = {
+        spec.experiment_id: build_experiment_execution_identity(run_context, spec)
+        for spec in specifications
+    }
+    git_commit_sha = current_git_commit_sha()
     if first.data_split.phase == "final_holdout":
         if evaluation_mode != "full_resampling":
             raise ValueError("formal final holdout requires full_resampling evaluation")
         if holdout_lock_path is None:
             raise ValueError("formal final holdout requires a lock path")
         for spec in specifications:
-            acquire_holdout_lock(spec, holdout_lock_path)
-
-    validated = validate_draw_dataframe(draws)
-    if generate_history_integrity_report(validated).blocks_backtest:
-        raise ValueError("history integrity errors block formal experiments")
+            acquire_holdout_lock(
+                spec,
+                holdout_lock_path,
+                identity=execution_identities[spec.experiment_id],
+                run_context=run_context,
+            )
     phase_start, phase_end = _phase_bounds(validated, first)
     target_start = max(minimum_history, phase_start)
     allowed_targets = None if target_issues is None else {str(issue) for issue in target_issues}
@@ -293,7 +323,6 @@ def _shared_bank_experiment_batch(
     observations: list[dict[str, object]] = []
     execution_rows: list[ExperimentExecutionRecord] = []
     target_timing_rows: list[TargetExecutionTiming] = []
-    config_hashes = {spec.experiment_id: experiment_config_sha256(spec) for spec in specifications}
     for seed in first.seeds:
         wall_started = perf_counter()
         cpu_started = process_time()
@@ -367,6 +396,7 @@ def _shared_bank_experiment_batch(
             target_vectorized_scoring_seconds = 0.0
             target_final_object_seconds = 0.0
             for spec in specifications:
+                execution_identity = execution_identities[spec.experiment_id]
                 signature = portfolio_constraints_signature(spec.portfolio_constraints)
                 bank_seed = deterministic_subseed(seed, target_issue, "bank", signature)
                 was_cached = signature in banks_by_signature
@@ -537,10 +567,20 @@ def _shared_bank_experiment_batch(
                 prediction = base_prediction.model_copy(
                     update={
                         "strategy_name": strategy_name,
-                        "model_version": "shared-feasible-bank-experiment-v0.5.2",
+                        "model_version": RUNNER_VERSION,
                         "parameters": {
                             **base_prediction.parameters,
-                            "experiment_config_sha256": config_hashes[spec.experiment_id],
+                            "execution_identity_schema_version": (
+                                EXECUTION_IDENTITY_SCHEMA_VERSION
+                            ),
+                            "runner_version": RUNNER_VERSION,
+                            "experiment_config_sha256": (
+                                execution_identity.experiment_config_sha256
+                            ),
+                            "run_context_sha256": execution_identity.run_context_sha256,
+                            "execution_config_sha256": (execution_identity.execution_config_sha256),
+                            "history_sha256": run_context.payload.history_sha256,
+                            "requested_portfolio_scoring_method": portfolio_scoring_method,
                             "evaluation_mode": evaluation_mode,
                             "scorer_spec": spec.scorer_spec.model_dump(mode="json"),
                             "number_score_weight": spec.number_score_weight,
@@ -635,7 +675,22 @@ def _shared_bank_experiment_batch(
                     {
                         "experiment_id": spec.experiment_id,
                         "experiment_version": spec.experiment_version,
-                        "experiment_config_sha256": config_hashes[spec.experiment_id],
+                        "experiment_spec_json": spec.model_dump_json(),
+                        "experiment_config_sha256": execution_identities[
+                            spec.experiment_id
+                        ].experiment_config_sha256,
+                        "run_context_sha256": run_context.run_context_sha256,
+                        "execution_config_sha256": execution_identities[
+                            spec.experiment_id
+                        ].execution_config_sha256,
+                        "execution_identity_schema_version": (EXECUTION_IDENTITY_SCHEMA_VERSION),
+                        "runner_version": RUNNER_VERSION,
+                        "history_sha256": run_context.payload.history_sha256,
+                        "git_commit_sha": git_commit_sha,
+                        "requested_portfolio_scoring_method": portfolio_scoring_method,
+                        "storage_schema_version": STORAGE_SCHEMA_VERSION,
+                        "identity_status": "formal_verified",
+                        "formal_inference_eligible": True,
                         "phase": spec.data_split.phase,
                         "evaluation_mode": evaluation_mode,
                         "profile": profile,
@@ -688,7 +743,13 @@ def _shared_bank_experiment_batch(
                 ExperimentExecutionRecord(
                     experiment_id=spec.experiment_id,
                     experiment_version=spec.experiment_version,
-                    experiment_config_sha256=config_hashes[spec.experiment_id],
+                    experiment_config_sha256=execution_identities[
+                        spec.experiment_id
+                    ].experiment_config_sha256,
+                    run_context_sha256=run_context.run_context_sha256,
+                    execution_config_sha256=execution_identities[
+                        spec.experiment_id
+                    ].execution_config_sha256,
                     phase=spec.data_split.phase,
                     seed=seed,
                     period_count=period_count,
@@ -719,7 +780,8 @@ def _shared_bank_experiment_batch(
             )
             finalize_holdout_lock(
                 holdout_lock_path,
-                experiment_version=spec.experiment_version,
+                spec=spec,
+                identity=execution_identities[spec.experiment_id],
                 result_bytes=result_bytes,
             )
     return ExperimentBatchResult(frame, tuple(execution_rows), tuple(target_timing_rows))
@@ -743,10 +805,31 @@ def _run_legacy_experiment(
     if generate_history_integrity_report(validated).blocks_backtest:
         raise ValueError("history integrity errors block formal experiments")
     phase_start, phase_end = _phase_bounds(validated, spec)
+    run_context = build_run_context_identity(
+        validated,
+        data_split_spec=spec.data_split,
+        phase=spec.data_split.phase,
+        evaluation_mode="full_resampling",
+        profile=profile,
+        portfolio_scoring_method="object_reference",
+        minimum_history=minimum_history,
+        minimum_bank_size=1,
+        maximum_bank_search_trials=PROFILE_DEFAULTS[profile]["optimizer_search_trials"],
+        prize_tables=prize_tables,
+        issue_prize_records=issue_prize_records,
+        worker_count=parallel_workers,
+    )
+    execution_identity = build_experiment_execution_identity(run_context, spec)
+    git_commit_sha = current_git_commit_sha()
     if spec.data_split.phase == "final_holdout":
         if holdout_lock_path is None:
             raise ValueError("formal final holdout requires a lock path")
-        acquire_holdout_lock(spec, holdout_lock_path)
+        acquire_holdout_lock(
+            spec,
+            holdout_lock_path,
+            identity=execution_identity,
+            run_context=run_context,
+        )
 
     target_start = max(minimum_history, phase_start)
     prefix = validated.iloc[:phase_end].copy()
@@ -756,7 +839,7 @@ def _run_legacy_experiment(
     observations: list[dict[str, object]] = []
     executions: list[ExperimentExecutionRecord] = []
     result_name = _result_strategy_name(spec)
-    config_hash = experiment_config_sha256(spec)
+    config_hash = execution_identity.experiment_config_sha256
 
     for seed in spec.seeds:
         strategies = None
@@ -796,7 +879,21 @@ def _run_legacy_experiment(
                 {
                     "experiment_id": spec.experiment_id,
                     "experiment_version": spec.experiment_version,
+                    "experiment_spec_json": spec.model_dump_json(),
                     "experiment_config_sha256": config_hash,
+                    "run_context_sha256": run_context.run_context_sha256,
+                    "execution_config_sha256": execution_identity.execution_config_sha256,
+                    "execution_identity_schema_version": EXECUTION_IDENTITY_SCHEMA_VERSION,
+                    "runner_version": RUNNER_VERSION,
+                    "history_sha256": run_context.payload.history_sha256,
+                    "git_commit_sha": git_commit_sha,
+                    "evaluation_mode": "full_resampling",
+                    "profile": profile,
+                    "portfolio_scoring_method": "object_reference",
+                    "requested_portfolio_scoring_method": "object_reference",
+                    "storage_schema_version": STORAGE_SCHEMA_VERSION,
+                    "identity_status": "formal_verified",
+                    "formal_inference_eligible": True,
                     "phase": spec.data_split.phase,
                     "seed": seed,
                     "prediction_random_seed": result.random_seed,
@@ -810,6 +907,8 @@ def _run_legacy_experiment(
                 experiment_id=spec.experiment_id,
                 experiment_version=spec.experiment_version,
                 experiment_config_sha256=config_hash,
+                run_context_sha256=run_context.run_context_sha256,
+                execution_config_sha256=execution_identity.execution_config_sha256,
                 phase=spec.data_split.phase,
                 seed=seed,
                 period_count=len(selected),
@@ -824,7 +923,8 @@ def _run_legacy_experiment(
         result_bytes = frame.to_csv(index=False, lineterminator="\n").encode("utf-8")
         finalize_holdout_lock(
             holdout_lock_path,
-            experiment_version=spec.experiment_version,
+            spec=spec,
+            identity=execution_identity,
             result_bytes=result_bytes,
         )
     return batch

@@ -135,6 +135,14 @@ def test_b1_through_b6_raw_build_one_bank_and_skip_full_backtest(
     )
 
     assert len(result.observations) == 6
+    assert result.observations["run_context_sha256"].nunique() == 1
+    assert result.observations["execution_config_sha256"].nunique() == 6
+    assert result.observations["history_sha256"].nunique() == 1
+    assert set(result.observations["requested_portfolio_scoring_method"]) == {"numpy_vectorized"}
+    assert set(result.observations["formal_inference_eligible"]) == {True}
+    assert result.observations["experiment_version"].tolist() == [
+        f"v0.5.5-b{index}-shared-bank-v2" for index in range(1, 7)
+    ]
     assert result.observations["candidate_numbers_hash"].nunique() == 1
     assert result.observations["constraints_signature"].nunique() == 1
     assert result.observations["bank_hash"].nunique() == 1
