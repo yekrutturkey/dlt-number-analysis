@@ -5,14 +5,22 @@ from __future__ import annotations
 import json
 import os
 import socket
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from dlt_number_analysis import DISCLAIMER
 from dlt_number_analysis.experiments.identity import current_git_commit_sha
+from dlt_number_analysis.experiments.manual_operations import (
+    StaleRunLockClearAuditV2,
+    atomic_write_manual_audit,
+    operation_id,
+    operator_hostname,
+)
 
 
 class RunLockRecord(BaseModel):
@@ -34,17 +42,16 @@ class RunLockRecord(BaseModel):
     risk_disclaimer: str = DISCLAIMER
 
 
-class StaleRunLockClearAudit(BaseModel):
-    """Permanent evidence of one explicitly authorized stale-lock removal."""
+StaleRunLockClearAudit = StaleRunLockClearAuditV2
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: str = "stale-run-lock-clear-v1"
-    original_lock: dict[str, object] | str
-    cleared_at: datetime
-    reason: str = Field(min_length=1)
-    git_commit_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
-    risk_disclaimer: str = DISCLAIMER
+StaleLockClearFaultPoint = Literal[
+    "before_prepare_audit_write",
+    "after_prepare_audit_commit",
+    "before_lock_delete",
+    "after_lock_delete",
+    "before_completed_audit_update",
+]
+StaleLockClearFaultInjector = Callable[[StaleLockClearFaultPoint], None]
 
 
 def _write_new_file(path: Path, content: bytes) -> None:
@@ -54,6 +61,18 @@ def _write_new_file(path: Path, content: bytes) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _inject_clear_fault(
+    injector: StaleLockClearFaultInjector | None,
+    point: StaleLockClearFaultPoint,
+) -> None:
+    if injector is not None:
+        injector(point)
+
+
+def _delete_lock(path: Path) -> None:
+    path.unlink()
 
 
 class FormalRunLock:
@@ -122,8 +141,9 @@ def clear_stale_run_lock(
     *,
     reason: str,
     audit_directory: str | Path,
+    _fault_injector: StaleLockClearFaultInjector | None = None,
 ) -> Path:
-    """Remove exactly one named lock only after explicit reason and write an audit."""
+    """Persist prepared intent before removing exactly one named stale lock."""
     if not reason.strip():
         raise ValueError("stale run lock clearing requires a reason")
     target = Path(path)
@@ -135,21 +155,41 @@ def clear_stale_run_lock(
         original: dict[str, object] | str = parsed if isinstance(parsed, dict) else raw
     except json.JSONDecodeError:
         original = raw
-    target.unlink()
-    cleared_at = datetime.now(UTC)
-    audit = StaleRunLockClearAudit(
+    requested_at = datetime.now(UTC)
+    operation = operation_id()
+    audit_path = Path(audit_directory) / f"stale_lock_clear_{operation}.json"
+    prepared = StaleRunLockClearAuditV2(
+        operation_id=operation,
+        lock_path=target.resolve(),
         original_lock=original,
-        cleared_at=cleared_at,
+        requested_at=requested_at,
+        status="prepared",
         reason=reason.strip(),
         git_commit_sha=current_git_commit_sha(),
+        operator_hostname=operator_hostname(),
     )
-    directory = Path(audit_directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    audit_path = directory / (
-        f"stale_lock_clear_{cleared_at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex}.json"
+    _inject_clear_fault(_fault_injector, "before_prepare_audit_write")
+    atomic_write_manual_audit(audit_path, prepared)
+    _inject_clear_fault(_fault_injector, "after_prepare_audit_commit")
+    _inject_clear_fault(_fault_injector, "before_lock_delete")
+    try:
+        _delete_lock(target)
+    except OSError as error:
+        failed = prepared.model_copy(
+            update={
+                "status": "failed",
+                "failure_message": str(error),
+            }
+        )
+        atomic_write_manual_audit(audit_path, failed)
+        raise RuntimeError("stale run lock deletion failed") from error
+    _inject_clear_fault(_fault_injector, "after_lock_delete")
+    _inject_clear_fault(_fault_injector, "before_completed_audit_update")
+    completed = prepared.model_copy(
+        update={
+            "status": "completed",
+            "completed_at": datetime.now(UTC),
+        }
     )
-    _write_new_file(
-        audit_path,
-        (audit.model_dump_json(indent=2) + "\n").encode("utf-8"),
-    )
+    atomic_write_manual_audit(audit_path, completed)
     return audit_path

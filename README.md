@@ -1,5 +1,43 @@
 # dlt-number-analysis
 
+## v0.5.7.1：rename/copy 双端点审计与人工恢复事务
+
+Git `status --porcelain=v1 -z` 的 rename/copy 记录按 Git 实际顺序解析：第一条路径是
+目标路径，紧随其后的第二条路径是原始路径。审计同时检查 source 和 destination；任一
+端点位于受保护的源代码、配置或冻结数据范围，或者任一生成文件端点未被本次 CLI
+明确授权，正式执行都会被阻断。审计报告以 `source -> destination` 保留两个端点，
+不会把移动到授权输出目录当作来源路径已经安全。
+
+stale `RUNNING.lock` 清理和 schema_v4 `CURRENT` repair 现在都先持久化
+`status=prepared` 的独立审计，再改变锁或指针，成功后原子更新为
+`status=completed`；操作失败尽量更新为 `status=failed`。如果状态已经改变而最终审计
+更新中断，prepared 文件仍保留。可使用以下只读模式检查 prepared、completed、failed
+和不一致操作；它不会获取运行锁、修改 CURRENT、删除锁或生成候选：
+
+```powershell
+uv run python scripts/run_v05_experiments.py --audit-manual-operations `
+  --target-issues <issue> --experiment-ids B1
+```
+
+清理 stale lock 前必须先确认原进程已经退出，再显式提供原因。首次 append 如果在完整
+generation rename 后、CURRENT 创建前中断，会留下 valid orphan 且没有 CURRENT：正式
+读取不会自动选择它，普通 resume 的 preflight 会因无效/缺失 CURRENT 阻断。恢复顺序为：
+
+```powershell
+uv run python scripts/run_v05_experiments.py --audit-generations `
+  --target-issues <issue> --experiment-ids B1
+
+uv run python scripts/run_v05_experiments.py --repair-current `
+  --repair-generation-id <validated-generation-id> `
+  --repair-reason "人工核验后的恢复原因" `
+  --target-issues <issue> --experiment-ids B1
+```
+
+不得手工创建或编辑 `CURRENT`，不得因为存在 orphan 就按 mtime 或名称选择“最新”
+generation。若 `--audit-manual-operations` 报告 prepared 但未 completed，应人工核对锁是否
+仍存在、CURRENT 是否已经指向 proposed generation，并保留审计后再决定下一步；工具不会
+自动修复这些状态。
+
 ## v0.5.7：generation 事务、强制 preflight 与中断恢复
 
 正式结果默认写入 `outputs/experiments/schema_v4/`。逻辑分区仍包含 phase、实验版本、

@@ -20,6 +20,12 @@ from dlt_number_analysis.experiments.identity import (
     RunContextIdentity,
     current_git_commit_sha,
 )
+from dlt_number_analysis.experiments.manual_operations import (
+    CurrentPointerRepairAuditV2,
+    atomic_write_manual_audit,
+    operation_id,
+    operator_hostname,
+)
 from dlt_number_analysis.experiments.specs import ExperimentPhase, ExperimentSpec
 from dlt_number_analysis.experiments.splits import experiment_config_sha256
 from dlt_number_analysis.experiments.storage import (
@@ -108,18 +114,16 @@ class PartitionGenerationAudit(BaseModel):
     warnings: tuple[str, ...]
 
 
-class CurrentPointerRepairAudit(BaseModel):
-    """Independent audit record for one explicit CURRENT repair."""
+CurrentPointerRepairAudit = CurrentPointerRepairAuditV2
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: str = "schema-v4-current-repair-v1"
-    original_current: dict[str, object] | str | None
-    new_current: CurrentPointerV4
-    repaired_at: datetime
-    reason: str = Field(min_length=1)
-    git_commit_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
-    risk_disclaimer: str = DISCLAIMER
+CurrentRepairFaultPoint = Literal[
+    "before_prepare_audit_write",
+    "after_prepare_audit_commit",
+    "before_current_replace",
+    "after_current_replace",
+    "before_completed_audit_update",
+]
+CurrentRepairFaultInjector = Callable[[CurrentRepairFaultPoint], None]
 
 
 def _fsync_file(path: Path) -> None:
@@ -165,6 +169,18 @@ def _inject(
 ) -> None:
     if injector is not None:
         injector(point)
+
+
+def _inject_repair_fault(
+    injector: CurrentRepairFaultInjector | None,
+    point: CurrentRepairFaultPoint,
+) -> None:
+    if injector is not None:
+        injector(point)
+
+
+def _replace_current(temporary: Path, current: Path) -> None:
+    os.replace(temporary, current)
 
 
 class ExperimentResultStoreV4:
@@ -722,8 +738,9 @@ class ExperimentResultStoreV4:
         seed: int,
         generation_id: str,
         reason: str,
+        _fault_injector: CurrentRepairFaultInjector | None = None,
     ) -> Path:
-        """Explicitly point CURRENT at one named generation that validates fully."""
+        """Persist prepared intent before pointing CURRENT at a valid generation."""
         if not reason.strip():
             raise ValueError("schema-v4 CURRENT repair requires a reason")
         audit = self.audit_partition_generations(
@@ -741,10 +758,22 @@ class ExperimentResultStoreV4:
             seed=seed,
             generation_id=generation_id,
         )
+        validated_manifest_sha = _sha256_file(generation / "manifest.json")
+        self._validate_generation_directory(
+            generation,
+            spec,
+            identity,
+            cohort,
+            seed=seed,
+            expected_generation_id=generation_id,
+            expected_manifest_sha256=validated_manifest_sha,
+        )
         current_path = self.current_path(spec, identity, cohort, seed=seed)
         original: dict[str, object] | str | None = None
+        original_sha256: str | None = None
         if current_path.exists():
             raw = current_path.read_text(encoding="utf-8")
+            original_sha256 = _sha256_file(current_path)
             try:
                 parsed = json.loads(raw)
                 original = parsed if isinstance(parsed, dict) else raw
@@ -752,28 +781,71 @@ class ExperimentResultStoreV4:
                 original = raw
         replacement = CurrentPointerV4(
             generation_id=generation_id,
-            manifest_sha256=_sha256_file(generation / "manifest.json"),
+            manifest_sha256=validated_manifest_sha,
             updated_at=datetime.now(UTC),
         )
-        temporary = current_path.with_name(f".CURRENT.repair.{uuid4().hex}.tmp")
-        current_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json_fsync(temporary, replacement.model_dump(mode="json"))
-        os.replace(temporary, current_path)
-        _fsync_directory(current_path.parent)
-        repaired_at = datetime.now(UTC)
-        repair = CurrentPointerRepairAudit(
+        requested_at = datetime.now(UTC)
+        operation = operation_id()
+        repair_directory = current_path.parent / "repairs"
+        repair_path = repair_directory / f"repair_{operation}.json"
+        prepared = CurrentPointerRepairAuditV2(
+            operation_id=operation,
+            partition_path=current_path.parent.resolve(),
             original_current=original,
-            new_current=replacement,
-            repaired_at=repaired_at,
+            original_current_sha256=original_sha256,
+            requested_generation_id=generation_id,
+            validated_generation_manifest_sha256=validated_manifest_sha,
+            proposed_current=replacement.model_dump(mode="json"),
+            requested_at=requested_at,
+            status="prepared",
             reason=reason.strip(),
             git_commit_sha=current_git_commit_sha(),
+            operator_hostname=operator_hostname(),
         )
-        repair_directory = current_path.parent / "repairs"
-        repair_directory.mkdir(parents=True, exist_ok=True)
-        repair_path = repair_directory / (
-            f"repair_{repaired_at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex}.json"
+        _inject_repair_fault(_fault_injector, "before_prepare_audit_write")
+        atomic_write_manual_audit(repair_path, prepared)
+        _inject_repair_fault(_fault_injector, "after_prepare_audit_commit")
+        temporary = current_path.with_name(f".CURRENT.repair.{operation}.tmp")
+        current_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _write_json_fsync(temporary, replacement.model_dump(mode="json"))
+        except OSError as error:
+            failed = prepared.model_copy(update={"status": "failed", "failure_message": str(error)})
+            atomic_write_manual_audit(repair_path, failed)
+            raise RuntimeError("schema-v4 repair temporary CURRENT write failed") from error
+        _inject_repair_fault(_fault_injector, "before_current_replace")
+        try:
+            _replace_current(temporary, current_path)
+        except OSError as error:
+            temporary.unlink(missing_ok=True)
+            failed = prepared.model_copy(update={"status": "failed", "failure_message": str(error)})
+            atomic_write_manual_audit(repair_path, failed)
+            raise RuntimeError("schema-v4 CURRENT replacement failed") from error
+        _fsync_directory(current_path.parent)
+        _inject_repair_fault(_fault_injector, "after_current_replace")
+        resolved = self._read_current_generation(
+            spec,
+            identity,
+            cohort,
+            seed=seed,
         )
-        _write_json_fsync(repair_path, repair.model_dump(mode="json"))
+        if resolved is None or resolved[2].generation_id != generation_id:
+            failed = prepared.model_copy(
+                update={
+                    "status": "failed",
+                    "failure_message": "CURRENT post-repair verification failed",
+                }
+            )
+            atomic_write_manual_audit(repair_path, failed)
+            raise RuntimeError("schema-v4 CURRENT post-repair verification failed")
+        _inject_repair_fault(_fault_injector, "before_completed_audit_update")
+        completed = prepared.model_copy(
+            update={
+                "status": "completed",
+                "completed_at": datetime.now(UTC),
+            }
+        )
+        atomic_write_manual_audit(repair_path, completed)
         return repair_path
 
     def load_cohort(

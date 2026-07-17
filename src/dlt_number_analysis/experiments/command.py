@@ -25,6 +25,12 @@ from dlt_number_analysis.experiments.identity import (
     build_experiment_execution_identity,
     build_run_context_identity,
 )
+from dlt_number_analysis.experiments.manual_operations import (
+    CurrentPointerRepairAuditV2,
+    StaleRunLockClearAuditV2,
+    atomic_write_manual_audit,
+    audit_manual_operations,
+)
 from dlt_number_analysis.experiments.preflight import (
     build_experiment_preflight,
     write_experiment_preflight,
@@ -115,10 +121,12 @@ def build_parser() -> argparse.ArgumentParser:
     modes.add_argument("--audit-generations", action="store_true")
     modes.add_argument("--repair-current", action="store_true")
     modes.add_argument("--clear-stale-run-lock", action="store_true")
+    modes.add_argument("--audit-manual-operations", action="store_true")
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--repair-generation-id")
     parser.add_argument("--repair-reason")
     parser.add_argument("--stale-lock-reason")
+    parser.add_argument("--manual-operations-audit-output", type=Path)
     parser.add_argument("--run-context-sha256")
     parser.add_argument("--cohort-definition-sha256")
     parser.add_argument("--cohort-id")
@@ -659,17 +667,38 @@ def main(argv: list[str] | None = None) -> int:
             generation_id=args.repair_generation_id,
             reason=args.repair_reason,
         )
-        print(f"CURRENT repair audit: {path}")
+        record = CurrentPointerRepairAuditV2.model_validate_json(path.read_text(encoding="utf-8"))
+        print(f"operation_id: {record.operation_id}")
+        print(f"audit_path: {path}")
+        print(f"final_status: {record.status}")
+        print(f"current_changed: {record.status == 'completed'}")
         print(DISCLAIMER)
         return 0
     run_lock_path = formal_run_root / "RUNNING.lock"
+    if args.audit_manual_operations:
+        report = audit_manual_operations((args.run_log_dir, args.results_root))
+        if args.manual_operations_audit_output is not None:
+            atomic_write_manual_audit(args.manual_operations_audit_output, report)
+            print(f"manual operations audit: {args.manual_operations_audit_output}")
+        print(f"prepared_operations: {len(report.prepared_operations)}")
+        print(f"completed_operations: {len(report.completed_operations)}")
+        print(f"failed_operations: {len(report.failed_operations)}")
+        print(f"inconsistent_operations: {len(report.inconsistent_operations)}")
+        print(DISCLAIMER)
+        return 0
     if args.clear_stale_run_lock:
         audit_path = clear_stale_run_lock(
             run_lock_path,
             reason=args.stale_lock_reason,
             audit_directory=args.run_log_dir,
         )
-        print(f"stale run lock clear audit: {audit_path}")
+        record = StaleRunLockClearAuditV2.model_validate_json(
+            audit_path.read_text(encoding="utf-8")
+        )
+        print(f"operation_id: {record.operation_id}")
+        print(f"audit_path: {audit_path}")
+        print(f"final_status: {record.status}")
+        print(f"lock_deleted: {record.status == 'completed'}")
         print(DISCLAIMER)
         return 0
 

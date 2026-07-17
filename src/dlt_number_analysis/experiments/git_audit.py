@@ -7,17 +7,32 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 class GitStatusEntry(BaseModel):
-    """One porcelain-v1 status entry with staged/worktree columns preserved."""
+    """One porcelain-v1 entry with both endpoints for rename and copy changes."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    path: str
+    destination_path: str = Field(validation_alias=AliasChoices("destination_path", "path"))
+    source_path: str | None = None
     index_status: str
     worktree_status: str
+    change_type: Literal["normal", "rename", "copy"] = "normal"
+
+    @model_validator(mode="after")
+    def validate_endpoints(self) -> GitStatusEntry:
+        if self.change_type == "normal" and self.source_path is not None:
+            raise ValueError("normal Git status entries cannot have a source path")
+        if self.change_type in {"rename", "copy"} and self.source_path is None:
+            raise ValueError("rename/copy Git status entries require a source path")
+        return self
+
+    @property
+    def path(self) -> str:
+        """Backward-compatible destination path accessor."""
+        return self.destination_path
 
 
 class AuthorizedGeneratedPath(BaseModel):
@@ -149,16 +164,25 @@ def read_git_status_entries(project_root: str | Path) -> tuple[GitStatusEntry, .
         if len(text) < 4:
             raise ValueError("unexpected git porcelain entry")
         index_status, worktree_status = text[0], text[1]
-        path = text[3:]
-        if index_status in {"R", "C"} and index < len(tokens):
-            renamed_to = tokens[index].decode("utf-8", errors="surrogateescape")
+        destination_path = text[3:]
+        change_type: Literal["normal", "rename", "copy"] = "normal"
+        if "R" in {index_status, worktree_status}:
+            change_type = "rename"
+        elif "C" in {index_status, worktree_status}:
+            change_type = "copy"
+        source_path: str | None = None
+        if change_type in {"rename", "copy"}:
+            if index >= len(tokens) or not tokens[index]:
+                raise ValueError("rename/copy porcelain entry is missing its source path")
+            source_path = tokens[index].decode("utf-8", errors="surrogateescape")
             index += 1
-            path = renamed_to
         entries.append(
             GitStatusEntry(
-                path=path,
+                destination_path=destination_path,
+                source_path=source_path,
                 index_status=index_status,
                 worktree_status=worktree_status,
+                change_type=change_type,
             )
         )
     return tuple(entries)
@@ -180,33 +204,57 @@ def audit_git_worktree(
     tracked_source: list[str] = []
     untracked_source: list[str] = []
     staged_source: list[str] = []
+
+    def is_authorized(absolute: Path) -> bool:
+        for item in authorized:
+            if item.kind == "file" and absolute == item.path:
+                return True
+            if item.kind == "directory" and _is_within(absolute, item.path):
+                return True
+        return False
+
     for entry in entries:
-        absolute = (root / entry.path).resolve()
-        relative = _normalized_relative(absolute, root)
-        all_changed.append(relative)
-        source = _is_protected_source(absolute, root)
+        destination = (root / entry.destination_path).resolve()
+        destination_relative = _normalized_relative(destination, root)
+        source_path = None if entry.source_path is None else (root / entry.source_path).resolve()
+        source_relative = None if source_path is None else _normalized_relative(source_path, root)
+        display = (
+            destination_relative
+            if source_relative is None
+            else f"{source_relative} -> {destination_relative}"
+        )
+        all_changed.append(display)
         untracked = entry.index_status == "?" and entry.worktree_status == "?"
         staged = entry.index_status not in {" ", "?"}
-        if source:
-            if untracked:
-                untracked_source.append(relative)
-            else:
-                tracked_source.append(relative)
-            if staged:
-                staged_source.append(relative)
-        allowed = False
-        if not source:
-            for item in authorized:
-                if item.kind == "file" and absolute == item.path:
-                    allowed = True
-                    break
-                if item.kind == "directory" and _is_within(absolute, item.path):
-                    allowed = True
-                    break
-        if allowed:
-            authorized_dirty.append(relative)
+        endpoints = [("destination", destination, destination_relative)]
+        if source_path is not None and source_relative is not None:
+            endpoints.insert(0, ("source", source_path, source_relative))
+        endpoint_blockers: list[str] = []
+        for role, absolute, relative in endpoints:
+            protected = _is_protected_source(absolute, root)
+            if protected:
+                if untracked:
+                    untracked_source.append(relative)
+                else:
+                    tracked_source.append(relative)
+                if staged:
+                    staged_source.append(relative)
+            if protected:
+                endpoint_blockers.append(
+                    relative
+                    if entry.change_type == "normal"
+                    else f"{display} [blocking {entry.change_type} {role}: {relative}]"
+                )
+            elif not is_authorized(absolute):
+                endpoint_blockers.append(
+                    relative
+                    if entry.change_type == "normal"
+                    else f"{display} [unauthorized {entry.change_type} {role}: {relative}]"
+                )
+        if not endpoint_blockers:
+            authorized_dirty.append(display)
         else:
-            blocking.append(relative)
+            blocking.extend(endpoint_blockers)
     all_values = tuple(sorted(set(all_changed)))
     authorized_values = tuple(sorted(set(authorized_dirty)))
     blocking_values = tuple(sorted(set(blocking)))

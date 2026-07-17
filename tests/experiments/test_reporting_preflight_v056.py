@@ -25,6 +25,7 @@ from dlt_number_analysis.experiments.identity import (
     build_experiment_execution_identity,
     build_run_context_identity,
 )
+from dlt_number_analysis.experiments.manual_operations import ManualOperationsAuditReport
 from dlt_number_analysis.experiments.preflight import (
     build_experiment_preflight,
     write_experiment_preflight,
@@ -462,6 +463,111 @@ def test_normal_execution_stops_before_task_construction_when_preflight_fails(
     assert marker.exists()
     assert not generation_called
     assert not task_construction_called
+    assert not results_root.exists()
+
+
+def test_manual_operations_audit_mode_is_read_only_and_does_not_lock_or_generate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    draws = _history()
+    audit_called = False
+
+    class FakeStore:
+        def __init__(self, _: Path) -> None:
+            pass
+
+        def current_path(self, spec, identity, cohort, *, seed: int) -> Path:
+            return tmp_path / "schema_v4" / spec.experiment_id / f"seed_{seed}" / "CURRENT"
+
+        def audit_partition_generations(self, spec, identity, cohort, *, seed: int):
+            return PartitionGenerationAudit(
+                partition_directory=tmp_path / "schema_v4" / spec.experiment_id,
+                current_generation_id=None,
+                valid_generation_ids=(),
+                orphan_generation_ids=(),
+                invalid_generation_ids=(),
+                current_is_valid=True,
+                recovery_possible=False,
+                warnings=(),
+            )
+
+        def status(
+            self,
+            spec,
+            identity,
+            run_context,
+            cohort,
+            *,
+            seed: int,
+            expected_target_issues,
+        ) -> ExperimentPartitionStatusV4:
+            targets = tuple(expected_target_issues)
+            return ExperimentPartitionStatusV4(
+                phase=spec.data_split.phase,
+                experiment_id=spec.experiment_id,
+                experiment_version=spec.experiment_version,
+                run_context_sha256=identity.run_context_sha256,
+                execution_config_sha256=identity.execution_config_sha256,
+                cohort_definition_sha256=cohort.cohort_definition_sha256,
+                expected_targets_sha256=cohort.payload.expected_targets_sha256,
+                seed=seed,
+                current_path=self.current_path(spec, identity, cohort, seed=seed),
+                current_generation_id=None,
+                completed_target_issues=(),
+                pending_target_issues=targets,
+                is_complete=False,
+            )
+
+    def fake_manual_audit(_):
+        nonlocal audit_called
+        audit_called = True
+        return ManualOperationsAuditReport(
+            prepared_operations=(),
+            completed_operations=(),
+            failed_operations=(),
+            inconsistent_operations=(),
+            warnings=(),
+        )
+
+    monkeypatch.setattr(command, "ExperimentResultStoreV4", FakeStore)
+    monkeypatch.setattr(command, "load_verified_history", lambda _: draws)
+    monkeypatch.setattr(command, "audit_manual_operations", fake_manual_audit)
+    monkeypatch.setattr(
+        command,
+        "FormalRunLock",
+        lambda *_args, **_kwargs: pytest.fail("manual audit acquired run lock"),
+    )
+    monkeypatch.setattr(
+        command,
+        "build_process_tasks",
+        lambda *_args, **_kwargs: pytest.fail("manual audit constructed tasks"),
+    )
+    monkeypatch.setattr(
+        command,
+        "build_experiment_preflight",
+        lambda **_: pytest.fail("manual audit entered formal preflight execution"),
+    )
+    results_root = tmp_path / "schema_v4"
+    result = command.main(
+        [
+            "--audit-manual-operations",
+            "--experiment-ids",
+            "B1",
+            "--target-issues",
+            "20005",
+            "--minimum-history",
+            "3",
+            "--results-root",
+            str(results_root),
+        ]
+    )
+    output = capsys.readouterr().out
+    assert result == 0
+    assert audit_called
+    assert "prepared_operations: 0" in output
+    assert "inconsistent_operations: 0" in output
     assert not results_root.exists()
 
 

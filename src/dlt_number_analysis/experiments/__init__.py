@@ -83,6 +83,13 @@ from dlt_number_analysis.experiments.identity_smoke import (
     validate_v055_identity_smoke_resume,
     write_v055_identity_smoke_report,
 )
+from dlt_number_analysis.experiments.manual_operations import (
+    CurrentPointerRepairAuditV2,
+    ManualOperationsAuditReport,
+    ManualOperationSummary,
+    StaleRunLockClearAuditV2,
+    audit_manual_operations,
+)
 from dlt_number_analysis.experiments.preflight import (
     ExperimentPreflightPlan,
     PreflightCheck,
@@ -295,6 +302,7 @@ __all__ = [
     "CohortPurpose",
     "CompletedExperimentTask",
     "CurrentPointerRepairAudit",
+    "CurrentPointerRepairAuditV2",
     "CurrentPointerV4",
     "DataSplitSpec",
     "DistributionSummary",
@@ -327,6 +335,8 @@ __all__ = [
     "IsolatedProcessMetrics",
     "IsolatedStageOutcome",
     "LegacyObservationImportStore",
+    "ManualOperationSummary",
+    "ManualOperationsAuditReport",
     "PairedBootstrapResult",
     "PairedSmokeAudit",
     "PartitionGenerationAudit",
@@ -345,6 +355,7 @@ __all__ = [
     "SplitBoundary",
     "StagedAblationPlan",
     "StaleRunLockClearAudit",
+    "StaleRunLockClearAuditV2",
     "TargetExecutionTiming",
     "TemporalDataSplit",
     "V053BenchmarkPaths",
@@ -361,6 +372,7 @@ __all__ = [
     "assign_observation_cohorts",
     "atomic_write_json",
     "audit_git_worktree",
+    "audit_manual_operations",
     "baseline_experiment_specs",
     "benchmark_pipeline_profiles",
     "benchmark_vectorized_target",

@@ -11,12 +11,17 @@ import pandas as pd
 import pytest
 
 from dlt_number_analysis.data import CSV_COLUMNS
+from dlt_number_analysis.experiments import storage_v4 as storage_v4_module
 from dlt_number_analysis.experiments.cohort import build_cohort_definition_identity
 from dlt_number_analysis.experiments.identity import (
     EXECUTION_IDENTITY_SCHEMA_VERSION,
     RUNNER_VERSION,
     build_experiment_execution_identity,
     build_run_context_identity,
+)
+from dlt_number_analysis.experiments.manual_operations import (
+    CurrentPointerRepairAuditV2,
+    audit_manual_operations,
 )
 from dlt_number_analysis.experiments.specs import baseline_experiment_specs
 from dlt_number_analysis.experiments.storage import (
@@ -135,6 +140,23 @@ def _append_target(store: ExperimentResultStoreV4, target: str, identities) -> N
     store.append(
         pd.DataFrame([_row(target, spec=spec, context=context, identity=identity, cohort=cohort)])
     )
+
+
+def _first_append_orphan(tmp_path: Path):
+    identities = _identities(targets=("20005",))
+    spec, context, identity, cohort = identities
+    store = ExperimentResultStoreV4(tmp_path)
+    frame = pd.DataFrame(
+        [_row("20005", spec=spec, context=context, identity=identity, cohort=cohort)]
+    )
+
+    def fail(point: str) -> None:
+        if point == "after_generation_rename_before_current_write":
+            raise RuntimeError("first append interrupted")
+
+    with pytest.raises(RuntimeError, match="first append interrupted"):
+        store.append(frame, _fault_injector=fail)
+    return identities, store, frame
 
 
 def test_schema_v4_path_primary_key_and_two_generations(tmp_path: Path) -> None:
@@ -371,8 +393,9 @@ def test_orphan_is_audited_not_selected_and_repair_is_explicit(tmp_path: Path) -
         reason="recover fully validated interrupted append",
     )
     repair = CurrentPointerRepairAudit.model_validate_json(repair_path.read_text(encoding="utf-8"))
-    assert repair.new_current.generation_id == audit.orphan_generation_ids[0]
+    assert repair.requested_generation_id == audit.orphan_generation_ids[0]
     assert repair.reason.startswith("recover")
+    assert repair.status == "completed"
     assert store.read_partition(spec, identity, cohort, seed=77)["target_issue"].tolist() == [
         "20005",
         "20006",
@@ -418,6 +441,207 @@ def test_multiple_valid_orphans_never_change_current_automatically(tmp_path: Pat
     audit = store.audit_partition_generations(spec, identity, cohort, seed=77)
     assert len(audit.orphan_generation_ids) == 2
     assert current_path.read_bytes() == original
+
+
+def test_first_append_interruption_requires_explicit_audited_repair(tmp_path: Path) -> None:
+    identities, store, frame = _first_append_orphan(tmp_path)
+    spec, context, identity, cohort = identities
+    current_path = store.current_path(spec, identity, cohort, seed=77)
+    assert not current_path.exists()
+    audit = store.audit_partition_generations(spec, identity, cohort, seed=77)
+    assert audit.current_generation_id is None
+    assert len(audit.valid_generation_ids) == 1
+    assert audit.orphan_generation_ids == audit.valid_generation_ids
+    assert not audit.current_is_valid
+    assert audit.recovery_possible
+    with pytest.raises(ValueError, match="CURRENT is missing"):
+        store.read_partition(spec, identity, cohort, seed=77)
+    with pytest.raises(ValueError, match="CURRENT is missing"):
+        store.status(
+            spec,
+            identity,
+            context,
+            cohort,
+            seed=77,
+            expected_target_issues=("20005",),
+        )
+    repair_path = store.repair_current_pointer(
+        spec,
+        identity,
+        cohort,
+        seed=77,
+        generation_id=audit.orphan_generation_ids[0],
+        reason="recover validated first-append generation",
+    )
+    repair = CurrentPointerRepairAuditV2.model_validate_json(
+        repair_path.read_text(encoding="utf-8")
+    )
+    assert repair.status == "completed"
+    assert current_path.exists()
+    assert store.read_partition(spec, identity, cohort, seed=77)["target_issue"].tolist() == [
+        "20005"
+    ]
+    assert store.status(
+        spec,
+        identity,
+        context,
+        cohort,
+        seed=77,
+        expected_target_issues=("20005",),
+    ).is_complete
+    with pytest.raises(DuplicateExperimentResultError):
+        store.append(frame)
+    manual = audit_manual_operations((tmp_path,))
+    assert len(manual.completed_operations) == 1
+    assert not manual.inconsistent_operations
+    current_path.unlink()
+    inconsistent = audit_manual_operations((tmp_path,))
+    assert len(inconsistent.inconsistent_operations) == 1
+
+
+@pytest.mark.parametrize(
+    "fault_point",
+    ("before_parquet_write", "after_manifest_before_generation_rename"),
+)
+def test_first_append_early_fault_has_no_repairable_generation(
+    tmp_path: Path,
+    fault_point: str,
+) -> None:
+    identities = _identities(targets=("20005",))
+    spec, context, identity, cohort = identities
+    store = ExperimentResultStoreV4(tmp_path / fault_point)
+    frame = pd.DataFrame(
+        [_row("20005", spec=spec, context=context, identity=identity, cohort=cohort)]
+    )
+
+    def fail(point: str) -> None:
+        if point == fault_point:
+            raise RuntimeError("early first-append fault")
+
+    with pytest.raises(RuntimeError, match="early first-append fault"):
+        store.append(frame, _fault_injector=fail)
+    assert not store.current_path(spec, identity, cohort, seed=77).exists()
+    audit = store.audit_partition_generations(spec, identity, cohort, seed=77)
+    assert not audit.valid_generation_ids
+    assert not audit.orphan_generation_ids
+    assert audit.invalid_generation_ids
+    assert not audit.recovery_possible
+    official = tuple(
+        path
+        for path in store.generations_directory(spec, identity, cohort, seed=77).iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    )
+    assert not official
+    assert store.read_partition(spec, identity, cohort, seed=77).empty
+
+
+@pytest.mark.parametrize(
+    ("fault_point", "current_changed", "audit_exists"),
+    (
+        ("before_prepare_audit_write", False, False),
+        ("after_prepare_audit_commit", False, True),
+        ("before_current_replace", False, True),
+        ("after_current_replace", True, True),
+        ("before_completed_audit_update", True, True),
+    ),
+)
+def test_current_repair_faults_preserve_prepared_evidence(
+    tmp_path: Path,
+    fault_point: str,
+    current_changed: bool,
+    audit_exists: bool,
+) -> None:
+    identities, store, _ = _first_append_orphan(tmp_path)
+    spec, _, identity, cohort = identities
+    generation_id = store.audit_partition_generations(
+        spec, identity, cohort, seed=77
+    ).orphan_generation_ids[0]
+
+    def fail(point: str) -> None:
+        if point == fault_point:
+            raise RuntimeError("repair interrupted")
+
+    with pytest.raises(RuntimeError, match="repair interrupted"):
+        store.repair_current_pointer(
+            spec,
+            identity,
+            cohort,
+            seed=77,
+            generation_id=generation_id,
+            reason="fault-injected repair",
+            _fault_injector=fail,
+        )
+    current_path = store.current_path(spec, identity, cohort, seed=77)
+    assert current_path.exists() is current_changed
+    audit_paths = tuple(tmp_path.rglob("repair_*.json"))
+    assert bool(audit_paths) is audit_exists
+    if audit_exists:
+        record = CurrentPointerRepairAuditV2.model_validate_json(
+            audit_paths[0].read_text(encoding="utf-8")
+        )
+        assert record.status == "prepared"
+        manual = audit_manual_operations((tmp_path,))
+        assert bool(manual.inconsistent_operations) is current_changed
+
+
+def test_current_replace_failure_keeps_original_and_records_failed_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identities, store, _ = _first_append_orphan(tmp_path)
+    spec, _, identity, cohort = identities
+    generation_id = store.audit_partition_generations(
+        spec, identity, cohort, seed=77
+    ).orphan_generation_ids[0]
+
+    def deny_replace(_: Path, __: Path) -> None:
+        raise OSError("replace denied")
+
+    monkeypatch.setattr(storage_v4_module, "_replace_current", deny_replace)
+    with pytest.raises(RuntimeError, match="replacement failed"):
+        store.repair_current_pointer(
+            spec,
+            identity,
+            cohort,
+            seed=77,
+            generation_id=generation_id,
+            reason="replace failure",
+        )
+    assert not store.current_path(spec, identity, cohort, seed=77).exists()
+    audit_path = next(tmp_path.rglob("repair_*.json"))
+    audit = CurrentPointerRepairAuditV2.model_validate_json(audit_path.read_text(encoding="utf-8"))
+    assert audit.status == "failed"
+    assert audit.failure_message == "replace denied"
+
+
+def test_current_temporary_write_failure_keeps_original_and_records_failed_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identities, store, _ = _first_append_orphan(tmp_path)
+    spec, _, identity, cohort = identities
+    generation_id = store.audit_partition_generations(
+        spec, identity, cohort, seed=77
+    ).orphan_generation_ids[0]
+
+    def deny_write(_: Path, __: object) -> None:
+        raise OSError("write denied")
+
+    monkeypatch.setattr(storage_v4_module, "_write_json_fsync", deny_write)
+    with pytest.raises(RuntimeError, match="temporary CURRENT write failed"):
+        store.repair_current_pointer(
+            spec,
+            identity,
+            cohort,
+            seed=77,
+            generation_id=generation_id,
+            reason="temporary write failure",
+        )
+    assert not store.current_path(spec, identity, cohort, seed=77).exists()
+    audit_path = next(tmp_path.rglob("repair_*.json"))
+    audit = CurrentPointerRepairAuditV2.model_validate_json(audit_path.read_text(encoding="utf-8"))
+    assert audit.status == "failed"
+    assert audit.failure_message == "write denied"
 
 
 def test_missing_current_with_official_generation_is_not_an_empty_partition(
