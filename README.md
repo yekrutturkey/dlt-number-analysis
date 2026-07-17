@@ -1,5 +1,32 @@
 # dlt-number-analysis
 
+## v0.5.7.2：任务完成即落盘与真实断点续跑
+
+正式 ProcessPool 调度现在通过父进程同步完成回调逐 task 提交。worker future 返回后，父进程
+先校验 `observations_json` 的 task、target、ExperimentSpec、seed、run context、execution config
+和完整 logical cohort 身份，再写 `formal-task-commit-v1` prepared 审计、调用 schema_v4
+`append`、回读各实验分区 CURRENT 并确认本 task 的目标已经进入 completed 集合，最后才把 task
+审计更新为 completed 并将它计入调度完成数。worker 子进程从不写 schema_v4，单写者仍是父进程。
+
+正式命令使用 `retain_full_results=false`：调度报告只保留 task ID、CPU 时间、结果哈希、观测数和
+committed 标记，不累计完整观测 JSON；schema_v4 Parquet 是正式观测来源。任务审计只记录执行
+过程，不是完成状态的最终事实来源。resume 每次都重新读取 CURRENT，为每个 ExperimentSpec
+独立计算 completed/pending；即使一个 B1–B6 task 只提交了部分实验，已提交实验也会跳过，只有
+仍缺失的实验与目标会重建 task。
+
+正式运行被 Ctrl+C 中断后，应在确认没有遗留活动进程后重复完全相同的命令。已切换 CURRENT 的
+targets 会自动跳过，最多损失仍在运行或尚未完成父进程提交的 task。`workers=1` 时理论最大未提交
+范围是一个 chunk；默认 `chunk_size=25` 时最多重算一个25期 chunk，而不是全部 development。
+强制终止遗留的 RUNNING.lock 仍必须使用已有的显式 stale-lock 审计流程。
+
+callback、store、task audit 或 worker 失败会保留已经成功切换的 CURRENT，不回滚早期提交。
+scheduler/runtime 记录 planned、worker completed、committed、failed、pending、首次/末次提交时间、
+提交耗时、中断状态和 resume 前已完成目标数。调度结束后还会重新读取全部 schema_v4 分区；只有
+所有实验 completed targets 完全等于 logical cohort、CURRENT 全部有效、身份一致且没有 failed 或
+pending task 时才生成正式策略比较报告。partial 状态只保存失败与运行时审计，不输出策略比较结论。
+
+评分不等于真实中奖概率，彩票开奖结果是随机事件。
+
 ## v0.5.7.1：rename/copy 双端点审计与人工恢复事务
 
 Git `status --porcelain=v1 -z` 的 rename/copy 记录按 Git 实际顺序解析：第一条路径是

@@ -238,6 +238,11 @@ def test_preflight_v2_checks_do_not_generate(tmp_path: Path) -> None:
     assert len(plan.checks) >= 30
     assert plan.schema_version == "experiment-preflight-v2"
     assert plan.ready
+    assert plan.incremental_commit_enabled
+    assert plan.planned_task_count == 1
+    assert plan.maximum_uncommitted_task_count == 1
+    assert plan.existing_completed_task_audit_count == 0
+    assert plan.inconsistent_task_audit_count == 0
 
 
 def test_formal_preflight_rejects_dirty_worktree(tmp_path: Path) -> None:

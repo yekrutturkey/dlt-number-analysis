@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import platform
 import socket
@@ -65,6 +67,7 @@ class FailedExperimentTask(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     task_id: str
+    failure_stage: Literal["worker", "callback", "scheduler"] = "worker"
     exception_type: str
     message: str
 
@@ -77,6 +80,20 @@ class CompletedExperimentTask(BaseModel):
     task_id: str
     result: dict[str, JsonValue]
     cpu_seconds: float = Field(ge=0)
+    worker_started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    worker_completed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class CompletedExperimentTaskSummary(BaseModel):
+    """Bounded scheduler metadata retained after a streamed formal commit."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    task_id: str
+    cpu_seconds: float = Field(ge=0)
+    result_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    observation_count: int = Field(ge=0)
+    committed: bool
 
 
 class ProcessSchedulerReport(BaseModel):
@@ -96,18 +113,77 @@ class ProcessSchedulerReport(BaseModel):
     estimated_remaining_runtime_seconds: float = Field(ge=0)
     completed_tasks: tuple[CompletedExperimentTask, ...]
     failed_tasks: tuple[FailedExperimentTask, ...]
+    completed_task_summaries: tuple[CompletedExperimentTaskSummary, ...] = ()
+    planned_task_count: int = Field(default=0, ge=0)
+    worker_completed_task_count: int = Field(default=0, ge=0)
+    committed_task_count: int = Field(default=0, ge=0)
+    failed_task_count: int = Field(default=0, ge=0)
+    pending_task_count: int = Field(default=0, ge=0)
+    first_commit_at: datetime | None = None
+    last_commit_at: datetime | None = None
+    mean_task_commit_seconds: float = Field(default=0.0, ge=0)
+    maximum_task_commit_seconds: float = Field(default=0.0, ge=0)
+    interrupted: bool = False
+    resumed_from_completed_target_count: int = Field(default=0, ge=0)
+    incremental_commit_enabled: bool = False
+    maximum_uncommitted_task_count: int = Field(default=0, ge=0)
     risk_disclaimer: str = DISCLAIMER
 
 
 ProcessTaskWorker = Callable[[ExperimentProcessTask], dict[str, JsonValue]]
+CompletedTaskCallback = Callable[
+    [ExperimentProcessTask, CompletedExperimentTask],
+    None,
+]
+FailedTaskCallback = Callable[[ExperimentProcessTask, FailedExperimentTask], None]
+
+
+class ProcessSchedulerFatalError(RuntimeError):
+    """Fatal scheduler/callback failure carrying all already-committed progress."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        report: ProcessSchedulerReport,
+        task_id: str | None,
+        interrupted: bool,
+    ) -> None:
+        super().__init__(message)
+        self.report = report
+        self.task_id = task_id
+        self.interrupted = interrupted
 
 
 def _timed_worker(
     worker: ProcessTaskWorker,
     task: ExperimentProcessTask,
-) -> tuple[dict[str, JsonValue], float]:
+) -> tuple[dict[str, JsonValue], float, datetime, datetime]:
+    started_at = datetime.now(UTC)
     started = process_time()
-    return worker(task), process_time() - started
+    result = worker(task)
+    return result, process_time() - started, started_at, datetime.now(UTC)
+
+
+def _result_sha256(result: dict[str, JsonValue]) -> str:
+    payload = json.dumps(
+        result,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _observation_count(result: dict[str, JsonValue]) -> int:
+    payload = result.get("observations_json")
+    if not isinstance(payload, str):
+        return 0
+    try:
+        records = json.loads(payload)
+    except json.JSONDecodeError:
+        return 0
+    return len(records) if isinstance(records, list) else 0
 
 
 def build_process_tasks(
@@ -182,8 +258,12 @@ def run_process_scheduler(
     *,
     workers: int | None = None,
     total_planned_tasks: int | None = None,
+    on_task_completed: CompletedTaskCallback | None = None,
+    on_task_failed: FailedTaskCallback | None = None,
+    retain_full_results: bool = True,
+    resumed_from_completed_target_count: int = 0,
 ) -> ProcessSchedulerReport:
-    """Execute with ProcessPoolExecutor; Python Portfolio search never uses threads."""
+    """Synchronously commit each finished task in the parent before counting it complete."""
     process_count = default_process_count() if workers is None else workers
     if process_count < 1:
         raise ValueError("workers must be positive")
@@ -192,37 +272,130 @@ def run_process_scheduler(
     started_at = datetime.now(UTC)
     wall_started = perf_counter()
     completed: list[CompletedExperimentTask] = []
+    summaries: list[CompletedExperimentTaskSummary] = []
     failed: list[FailedExperimentTask] = []
-    with ProcessPoolExecutor(max_workers=process_count) as executor:
-        futures = {executor.submit(_timed_worker, worker, task): task for task in tasks}
-        for future in as_completed(futures):
-            task = futures[future]
-            try:
-                result, cpu_seconds = future.result()
-            except Exception as error:
-                failed.append(
-                    FailedExperimentTask(
+    worker_completed_count = 0
+    commit_durations: list[float] = []
+    commit_times: list[datetime] = []
+    interrupted = False
+    fatal_error: BaseException | None = None
+    fatal_task_id: str | None = None
+    executor = ProcessPoolExecutor(max_workers=process_count)
+    try:
+        futures = {
+            executor.submit(_timed_worker, worker, task): task for task in tasks[:process_count]
+        }
+        next_task_index = len(futures)
+        try:
+            while futures:
+                future = next(as_completed(tuple(futures)))
+                task = futures.pop(future)
+                try:
+                    result, cpu_seconds, worker_started_at, worker_completed_at = future.result()
+                except Exception as error:
+                    failure = FailedExperimentTask(
                         task_id=task.task_id,
+                        failure_stage="worker",
                         exception_type=type(error).__name__,
                         message=str(error),
                     )
+                    failed.append(failure)
+                    if on_task_failed is not None:
+                        try:
+                            on_task_failed(task, failure)
+                        except KeyboardInterrupt as callback_error:
+                            interrupted = True
+                            fatal_error = callback_error
+                            fatal_task_id = task.task_id
+                            break
+                        except Exception as callback_error:
+                            fatal_error = callback_error
+                            fatal_task_id = task.task_id
+                            failed.append(
+                                FailedExperimentTask(
+                                    task_id=task.task_id,
+                                    failure_stage="callback",
+                                    exception_type=type(callback_error).__name__,
+                                    message=str(callback_error),
+                                )
+                            )
+                            break
+                    if next_task_index < len(tasks):
+                        next_task = tasks[next_task_index]
+                        futures[executor.submit(_timed_worker, worker, next_task)] = next_task
+                        next_task_index += 1
+                    continue
+                worker_completed_count += 1
+                item = CompletedExperimentTask(
+                    task_id=task.task_id,
+                    result=result,
+                    cpu_seconds=cpu_seconds,
+                    worker_started_at=worker_started_at,
+                    worker_completed_at=worker_completed_at,
                 )
-            else:
-                completed.append(
-                    CompletedExperimentTask(
+                commit_started = perf_counter()
+                try:
+                    if on_task_completed is not None:
+                        on_task_completed(task, item)
+                except KeyboardInterrupt as error:
+                    interrupted = True
+                    fatal_error = error
+                    fatal_task_id = task.task_id
+                    failed.append(
+                        FailedExperimentTask(
+                            task_id=task.task_id,
+                            failure_stage="callback",
+                            exception_type=type(error).__name__,
+                            message="task commit interrupted",
+                        )
+                    )
+                    break
+                except Exception as error:
+                    fatal_error = error
+                    fatal_task_id = task.task_id
+                    failed.append(
+                        FailedExperimentTask(
+                            task_id=task.task_id,
+                            failure_stage="callback",
+                            exception_type=type(error).__name__,
+                            message=str(error),
+                        )
+                    )
+                    break
+                commit_durations.append(perf_counter() - commit_started)
+                commit_times.append(datetime.now(UTC))
+                if retain_full_results:
+                    completed.append(item)
+                summaries.append(
+                    CompletedExperimentTaskSummary(
                         task_id=task.task_id,
-                        result=result,
                         cpu_seconds=cpu_seconds,
+                        result_sha256=_result_sha256(result),
+                        observation_count=_observation_count(result),
+                        committed=on_task_completed is not None,
                     )
                 )
+                if next_task_index < len(tasks):
+                    next_task = tasks[next_task_index]
+                    futures[executor.submit(_timed_worker, worker, next_task)] = next_task
+                    next_task_index += 1
+        except KeyboardInterrupt as error:
+            interrupted = True
+            fatal_error = error
+        if fatal_error is not None:
+            for future in futures:
+                if not future.done():
+                    future.cancel()
+    finally:
+        executor.shutdown(wait=fatal_error is None, cancel_futures=fatal_error is not None)
     wall_seconds = perf_counter() - wall_started
     ended_at = datetime.now(UTC)
-    completed_count = len(completed)
+    completed_count = len(summaries)
     throughput = 0.0 if wall_seconds == 0 else completed_count / wall_seconds * 3600
     planned = len(tasks) if total_planned_tasks is None else total_planned_tasks
-    remaining = max(planned - completed_count - len(failed), 0)
+    remaining = max(planned - completed_count, 0)
     estimated_remaining = 0.0 if throughput == 0 else remaining / throughput * 3600
-    return ProcessSchedulerReport(
+    report = ProcessSchedulerReport(
         process_count=process_count,
         hostname=socket.gethostname(),
         platform=platform.platform(),
@@ -230,12 +403,36 @@ def run_process_scheduler(
         started_at=started_at,
         ended_at=ended_at,
         wall_clock_seconds=wall_seconds,
-        total_cpu_time_seconds=sum(item.cpu_seconds for item in completed),
+        total_cpu_time_seconds=sum(item.cpu_seconds for item in summaries),
         experiment_throughput_per_hour=throughput,
         estimated_remaining_runtime_seconds=estimated_remaining,
         completed_tasks=tuple(sorted(completed, key=lambda item: item.task_id)),
+        completed_task_summaries=tuple(summaries),
         failed_tasks=tuple(sorted(failed, key=lambda item: item.task_id)),
+        planned_task_count=planned,
+        worker_completed_task_count=worker_completed_count,
+        committed_task_count=(completed_count if on_task_completed is not None else 0),
+        failed_task_count=len(failed),
+        pending_task_count=remaining,
+        first_commit_at=commit_times[0] if commit_times else None,
+        last_commit_at=commit_times[-1] if commit_times else None,
+        mean_task_commit_seconds=(
+            sum(commit_durations) / len(commit_durations) if commit_durations else 0.0
+        ),
+        maximum_task_commit_seconds=max(commit_durations, default=0.0),
+        interrupted=interrupted,
+        resumed_from_completed_target_count=resumed_from_completed_target_count,
+        incremental_commit_enabled=on_task_completed is not None,
+        maximum_uncommitted_task_count=min(process_count, len(tasks)),
     )
+    if fatal_error is not None:
+        raise ProcessSchedulerFatalError(
+            f"scheduler stopped while committing task {fatal_task_id or 'unknown'}: {fatal_error}",
+            report=report,
+            task_id=fatal_task_id,
+            interrupted=interrupted,
+        ) from fatal_error
+    return report
 
 
 def write_process_scheduler_report(

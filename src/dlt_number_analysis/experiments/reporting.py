@@ -734,7 +734,28 @@ def write_experiment_runtime_report(
 ) -> Path:
     """Aggregate shared-bank cache, process, CPU, wall time, and failure metrics."""
     rows: list[dict[str, object]] = []
+    scheduler_rows: list[dict[str, object]] = []
     for report in reports:
+        scheduler_rows.append(
+            {
+                "planned_task_count": report.planned_task_count,
+                "worker_completed_task_count": report.worker_completed_task_count,
+                "committed_task_count": report.committed_task_count,
+                "failed_task_count": report.failed_task_count,
+                "pending_task_count": report.pending_task_count,
+                "first_commit_at": report.first_commit_at,
+                "last_commit_at": report.last_commit_at,
+                "mean_task_commit_seconds": report.mean_task_commit_seconds,
+                "maximum_task_commit_seconds": report.maximum_task_commit_seconds,
+                "interrupted": report.interrupted,
+                "resumed_from_completed_target_count": (report.resumed_from_completed_target_count),
+                "incremental_commit_enabled": report.incremental_commit_enabled,
+                "maximum_uncommitted_task_count": report.maximum_uncommitted_task_count,
+                "process_count": report.process_count,
+                "total_cpu_time_seconds": report.total_cpu_time_seconds,
+                "wall_clock_seconds": report.wall_clock_seconds,
+            }
+        )
         for completed in report.completed_tasks:
             executions = completed.result.get("executions", [])
             if not isinstance(executions, list):
@@ -785,9 +806,21 @@ def write_experiment_runtime_report(
         "该报告来自追加保存的 ProcessPool 运行元数据；未执行的任务不会生成虚构指标。",
         "",
     ]
+    if scheduler_rows:
+        lines.extend(
+            [
+                "## 任务提交进度",
+                "",
+                _markdown_table(pd.DataFrame.from_records(scheduler_rows)),
+                "",
+            ]
+        )
     if rows:
+        lines.extend(["## 兼容执行明细", ""])
         lines.append(_markdown_table(pd.DataFrame.from_records(rows)))
     else:
-        lines.append("尚无已完成的 v0.5.1 ProcessPool 实验任务。")
+        lines.append(
+            "正式流式模式不在scheduler报告中保留完整观测JSON；schema_v4 Parquet是观测来源。"
+        )
     lines.extend(["", f"> {DISCLAIMER}"])
     return _write_text(path, "\n".join(lines))

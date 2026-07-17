@@ -83,6 +83,11 @@ class ExperimentPreflightPlan(BaseModel):
     end_issue: str
     completed_target_counts: dict[str, int]
     pending_target_counts: dict[str, int]
+    planned_task_count: int = Field(ge=0)
+    existing_completed_task_audit_count: int = Field(ge=0)
+    inconsistent_task_audit_count: int = Field(ge=0)
+    incremental_commit_enabled: bool
+    maximum_uncommitted_task_count: int = Field(ge=0)
     current_generation_by_partition: dict[str, str | None]
     orphan_generation_count: int = Field(ge=0)
     invalid_generation_count: int = Field(ge=0)
@@ -199,6 +204,10 @@ def build_experiment_preflight(
     final_holdout_report: bool = False,
     reads_holdout_lock: bool = False,
     identity_conflicts: Sequence[str] = (),
+    existing_completed_task_audit_count: int = 0,
+    inconsistent_task_audit_count: int = 0,
+    incremental_commit_enabled: bool = True,
+    maximum_uncommitted_task_count: int = 1,
 ) -> ExperimentPreflightPlan:
     """Build a truthful read-only gate without importing generation code."""
     if not specifications:
@@ -278,6 +287,7 @@ def build_experiment_preflight(
         (git_allowed, "blocking Git worktree changes exist"),
         (not touches_prior, "formal execution touches legacy or a prior schema"),
         (holdout_boundary_valid, "final holdout boundary or evaluation mode is invalid"),
+        (incremental_commit_enabled, "formal execution requires incremental task commits"),
     )
     for passed, reason in gates:
         if not passed:
@@ -426,6 +436,26 @@ def build_experiment_preflight(
             details=str(len(task_plan)),
         ),
         PreflightCheck(
+            name="incremental_commit_enabled",
+            passed=incremental_commit_enabled,
+            details=str(incremental_commit_enabled),
+        ),
+        PreflightCheck(
+            name="maximum_uncommitted_task_count",
+            passed=maximum_uncommitted_task_count <= max(len(task_plan), 1),
+            details=str(maximum_uncommitted_task_count),
+        ),
+        PreflightCheck(
+            name="existing_completed_task_audit_count",
+            passed=True,
+            details=str(existing_completed_task_audit_count),
+        ),
+        PreflightCheck(
+            name="inconsistent_task_audit_count",
+            passed=True,
+            details=str(inconsistent_task_audit_count),
+        ),
+        PreflightCheck(
             name="result_output_paths",
             passed=bool(output_paths),
             details=";".join(output_paths),
@@ -474,6 +504,11 @@ def build_experiment_preflight(
         end_issue=cohort.payload.end_issue,
         completed_target_counts=completed,
         pending_target_counts=pending,
+        planned_task_count=len(task_plan),
+        existing_completed_task_audit_count=existing_completed_task_audit_count,
+        inconsistent_task_audit_count=inconsistent_task_audit_count,
+        incremental_commit_enabled=incremental_commit_enabled,
+        maximum_uncommitted_task_count=maximum_uncommitted_task_count,
         current_generation_by_partition=current_generations,
         orphan_generation_count=orphan_count,
         invalid_generation_count=invalid_count,
@@ -528,6 +563,11 @@ def write_experiment_preflight(
         f"- Orphan generations: `{plan.orphan_generation_count}`",
         f"- Invalid generations: `{plan.invalid_generation_count}`",
         f"- Estimated tasks: `{plan.estimated_task_count}`",
+        f"- Planned tasks: `{plan.planned_task_count}`",
+        f"- Incremental commit: `{plan.incremental_commit_enabled}`",
+        f"- Maximum uncommitted tasks: `{plan.maximum_uncommitted_task_count}`",
+        f"- Completed task audits: `{plan.existing_completed_task_audit_count}`",
+        f"- Inconsistent task audits: `{plan.inconsistent_task_audit_count}`",
         "",
         "## Checks",
         "",

@@ -7,6 +7,7 @@ import json
 import sys
 from collections import defaultdict
 from pathlib import Path
+from time import perf_counter
 from typing import cast
 
 import pandas as pd
@@ -45,8 +46,13 @@ from dlt_number_analysis.experiments.reporting import (
 )
 from dlt_number_analysis.experiments.run_lock import FormalRunLock, clear_stale_run_lock
 from dlt_number_analysis.experiments.scheduler import (
+    CompletedExperimentTask,
+    ExperimentProcessTask,
+    FailedExperimentTask,
+    ProcessSchedulerFatalError,
     ProcessSchedulerReport,
     build_process_tasks,
+    default_process_count,
     run_process_scheduler,
     write_process_scheduler_report,
 )
@@ -65,6 +71,11 @@ from dlt_number_analysis.experiments.stages import (
 from dlt_number_analysis.experiments.storage_v4 import (
     ExperimentPartitionStatusV4,
     ExperimentResultStoreV4,
+)
+from dlt_number_analysis.experiments.task_commit import (
+    audit_task_commits,
+    commit_completed_task,
+    record_failed_task_audit,
 )
 from dlt_number_analysis.experiments.worker import execute_experiment_process_task
 from dlt_number_analysis.pipeline import PROFILE_DEFAULTS
@@ -244,6 +255,7 @@ def _resolve_output_paths(
         formal_root / "runtime/experiment_runtime.md"
     )
     args.run_log_dir = args.run_log_dir or (formal_root / "logs")
+    args.task_commit_root = formal_root
     default_results = PROJECT_ROOT / "outputs/experiments/schema_v4"
     default_preflight = PROJECT_ROOT / "outputs/experiments/run_plans"
     authorized: list[AuthorizedGeneratedPath] = [
@@ -266,6 +278,11 @@ def _resolve_output_paths(
             path=args.run_log_dir,
             kind="directory",
             explicitly_provided=explicit["run_log_dir"],
+        ),
+        AuthorizedGeneratedPath(
+            path=formal_root / "task_commits",
+            kind="directory",
+            explicitly_provided=False,
         ),
         AuthorizedGeneratedPath(
             path=args.summary_output,
@@ -449,18 +466,68 @@ def _ablation_status_rows(observations: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_records(rows)
 
 
-def _frames_from_scheduler_results(
-    report: ProcessSchedulerReport,
-) -> list[pd.DataFrame]:
-    completed = report.completed_tasks
-    frames: list[pd.DataFrame] = []
-    for item in completed:
-        payload = item.result.get("observations_json")
-        if not isinstance(payload, str):
-            raise ValueError("worker result is missing observations_json")
-        records = json.loads(payload)
-        frames.append(pd.DataFrame.from_records(records))
-    return frames
+def _completed_targets_by_partition(
+    statuses: dict[tuple[str, int], ExperimentPartitionStatusV4],
+) -> dict[tuple[str, int], set[str]]:
+    return {key: set(status.completed_target_issues) for key, status in statuses.items()}
+
+
+def _reload_completion_gate(
+    store: ExperimentResultStoreV4,
+    specifications: tuple[ExperimentSpec, ...],
+    identities_by_experiment: dict[str, ExperimentExecutionIdentity],
+    contexts_by_experiment: dict[str, RunContextIdentity],
+    cohort: CohortDefinitionIdentity,
+    reports: list[ProcessSchedulerReport],
+) -> tuple[dict[tuple[str, int], ExperimentPartitionStatusV4], tuple[str, ...]]:
+    """Re-read CURRENT for every partition before creating formal comparisons."""
+    statuses: dict[tuple[str, int], ExperimentPartitionStatusV4] = {}
+    blockers: list[str] = []
+    expected = cohort.payload.ordered_target_issues
+    completed_counts: set[int] = set()
+    if any(report.failed_tasks for report in reports):
+        blockers.append("one or more scheduler tasks failed")
+    for spec in specifications:
+        identity = identities_by_experiment[spec.experiment_id]
+        context = contexts_by_experiment[spec.experiment_id]
+        for seed in spec.seeds:
+            key = (spec.experiment_id, seed)
+            try:
+                status = store.status(
+                    spec,
+                    identity,
+                    context,
+                    cohort,
+                    seed=seed,
+                    expected_target_issues=expected,
+                )
+                audit = store.audit_partition_generations(
+                    spec,
+                    identity,
+                    cohort,
+                    seed=seed,
+                )
+            except (OSError, ValueError) as error:
+                blockers.append(f"{spec.experiment_id}:seed_{seed}: {error}")
+                continue
+            statuses[key] = status
+            completed_counts.add(len(status.completed_target_issues))
+            if not status.is_complete or status.pending_target_issues:
+                blockers.append(f"{spec.experiment_id}:seed_{seed}: pending targets remain")
+            if status.completed_target_issues != expected:
+                blockers.append(
+                    f"{spec.experiment_id}:seed_{seed}: completed targets differ from cohort"
+                )
+            if status.current_generation_id is None or not audit.current_is_valid:
+                blockers.append(f"{spec.experiment_id}:seed_{seed}: CURRENT is invalid")
+    expected_partition_count = sum(len(spec.seeds) for spec in specifications)
+    if len(statuses) != expected_partition_count:
+        blockers.append("not every experiment partition has a readable CURRENT")
+    if len(completed_counts) > 1:
+        blockers.append("experiment partitions have different completed target counts")
+    if len({context.run_context_sha256 for context in contexts_by_experiment.values()}) != 1:
+        blockers.append("experiment partitions do not share one run context")
+    return statuses, tuple(dict.fromkeys(blockers))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -724,6 +791,10 @@ def main(argv: list[str] | None = None) -> int:
         for spec in specifications
         for seed in spec.seeds
     ]
+    task_audit_report = audit_task_commits(
+        formal_run_root,
+        completed_targets_by_partition=_completed_targets_by_partition(statuses),
+    )
     preflight = build_experiment_preflight(
         project_root=PROJECT_ROOT,
         history_path=args.draws,
@@ -745,6 +816,13 @@ def main(argv: list[str] | None = None) -> int:
         final_holdout_report=final_holdout,
         reads_holdout_lock=final_holdout,
         identity_conflicts=identity_conflicts,
+        existing_completed_task_audit_count=task_audit_report.completed_count,
+        inconsistent_task_audit_count=task_audit_report.inconsistent_count,
+        incremental_commit_enabled=True,
+        maximum_uncommitted_task_count=min(
+            1 if final_holdout else (args.workers or default_process_count()),
+            len(task_plan),
+        ),
     )
     write_experiment_preflight(preflight, args.preflight_root)
     if args.preflight_only:
@@ -754,8 +832,11 @@ def main(argv: list[str] | None = None) -> int:
     if not preflight.ready:
         raise RuntimeError("formal experiment preflight failed; execution was not started")
 
-    failures = False
     scheduler_reports: list[ProcessSchedulerReport] = []
+    planned_task_count = len(task_plan)
+    committed_task_count = 0
+    resumed_target_count = sum(len(status.completed_target_issues) for status in statuses.values())
+    execution_started = perf_counter()
     command_summary = " ".join(argv if argv is not None else sys.argv[1:])
     lock = FormalRunLock(
         run_lock_path,
@@ -790,21 +871,113 @@ def main(argv: list[str] | None = None) -> int:
                     "holdout_lock_path": str(args.holdout_lock.resolve()),
                 },
             )
-            report = run_process_scheduler(
-                tasks,
-                execute_experiment_process_task,
-                workers=1 if final_holdout else args.workers,
-            )
+
+            def on_task_completed(
+                task: ExperimentProcessTask,
+                completed_task: CompletedExperimentTask,
+            ) -> None:
+                nonlocal committed_task_count
+                audit = commit_completed_task(
+                    task,
+                    completed_task,
+                    store,
+                    args.task_commit_root,
+                    identities_by_experiment=identities_by_experiment,
+                    contexts_by_experiment=contexts_by_experiment,
+                    cohort=cohort,
+                )
+                committed_task_count += 1
+                elapsed = perf_counter() - execution_started
+                remaining = max(planned_task_count - committed_task_count, 0)
+                print(
+                    f"committed task {committed_task_count}/{planned_task_count}: "
+                    f"targets={task.target_issues[0]}-{task.target_issues[-1]} "
+                    f"experiments={','.join(audit.experiment_ids)} "
+                    f"observations={audit.observation_count} "
+                    f"elapsed={elapsed:.2f}s remaining_tasks={remaining} "
+                    f"current_generation_count="
+                    f"{len(audit.committed_generation_by_experiment)}",
+                    flush=True,
+                )
+
+            def on_task_failed(
+                task: ExperimentProcessTask,
+                failure: FailedExperimentTask,
+            ) -> None:
+                record_failed_task_audit(
+                    task,
+                    failure,
+                    args.task_commit_root,
+                    identities_by_experiment=identities_by_experiment,
+                    contexts_by_experiment=contexts_by_experiment,
+                    cohort=cohort,
+                )
+
+            try:
+                report = run_process_scheduler(
+                    tasks,
+                    execute_experiment_process_task,
+                    workers=1 if final_holdout else args.workers,
+                    total_planned_tasks=len(tasks),
+                    on_task_completed=on_task_completed,
+                    on_task_failed=on_task_failed,
+                    retain_full_results=False,
+                    resumed_from_completed_target_count=resumed_target_count,
+                )
+            except ProcessSchedulerFatalError as error:
+                report = error.report
+                scheduler_reports.append(report)
+                timestamp = report.started_at.strftime("%Y%m%dT%H%M%S%fZ")
+                write_process_scheduler_report(
+                    report,
+                    args.scheduler_report_dir / f"run_{timestamp}.json",
+                )
+                write_experiment_runtime_report(
+                    tuple(scheduler_reports), args.experiment_runtime_output
+                )
+                print(
+                    f"fatal task commit failure: task_id={error.task_id} reason={error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                print(DISCLAIMER)
+                return 130 if error.interrupted else 1
             scheduler_reports.append(report)
             timestamp = report.started_at.strftime("%Y%m%dT%H%M%S%fZ")
             write_process_scheduler_report(
                 report,
                 args.scheduler_report_dir / f"run_{timestamp}.json",
             )
-            for frame in _frames_from_scheduler_results(report):
-                if not frame.empty:
-                    store.append(frame)
-            failures = failures or bool(report.failed_tasks)
+            if report.failed_tasks:
+                write_experiment_runtime_report(
+                    tuple(scheduler_reports), args.experiment_runtime_output
+                )
+                print(
+                    "worker task failure left targets pending; rerun the same command to resume",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                print(DISCLAIMER)
+                return 1
+        _final_statuses, completion_blockers = _reload_completion_gate(
+            store,
+            specifications,
+            identities_by_experiment,
+            contexts_by_experiment,
+            cohort,
+            scheduler_reports,
+        )
+        if completion_blockers:
+            write_experiment_runtime_report(
+                tuple(scheduler_reports), args.experiment_runtime_output
+            )
+            print(
+                "formal report gate blocked: " + "; ".join(completion_blockers),
+                file=sys.stderr,
+                flush=True,
+            )
+            print(DISCLAIMER)
+            return 1
         observations = store.load_cohort(
             run_context_sha256=shared_context.run_context_sha256,
             cohort_definition_sha256=cohort.cohort_definition_sha256,
@@ -832,4 +1005,4 @@ def main(argv: list[str] | None = None) -> int:
     print(f"run_context_sha256: {shared_context.run_context_sha256}")
     print(f"cohort_definition_sha256: {cohort.cohort_definition_sha256}")
     print(DISCLAIMER)
-    return 1 if failures else 0
+    return 0
