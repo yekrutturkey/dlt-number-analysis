@@ -13,9 +13,13 @@ from pathlib import Path
 from time import perf_counter, process_time
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from dlt_number_analysis import DISCLAIMER
+from dlt_number_analysis.experiments.cohort import (
+    CohortDefinitionIdentity,
+    task_targets_sha256,
+)
 from dlt_number_analysis.experiments.shared_computation import deterministic_subseed
 from dlt_number_analysis.experiments.specs import ExperimentSpec
 
@@ -36,9 +40,23 @@ class ExperimentProcessTask(BaseModel):
     partition_mode: TaskPartitionMode
     experiment_specs: tuple[ExperimentSpec, ...] = Field(min_length=1)
     target_issues: tuple[str, ...] = Field(min_length=1)
+    logical_cohort: CohortDefinitionIdentity | None = None
+    task_index: int = Field(default=0, ge=0)
+    task_targets_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     seed: int
     deterministic_subseed: int = Field(ge=0)
     parameters: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_task_chunk(self) -> ExperimentProcessTask:
+        expected_hash = task_targets_sha256(self.target_issues)
+        if self.task_targets_sha256 is not None and self.task_targets_sha256 != expected_hash:
+            raise ValueError("task target hash differs from task target issues")
+        if self.logical_cohort is not None:
+            cohort_targets = set(self.logical_cohort.payload.ordered_target_issues)
+            if not set(self.target_issues).issubset(cohort_targets):
+                raise ValueError("task targets are outside the logical cohort")
+        return self
 
 
 class FailedExperimentTask(BaseModel):
@@ -100,6 +118,7 @@ def build_process_tasks(
     chunk_size: int = 25,
     partition_mode: TaskPartitionMode = "target_chunk",
     parameters: dict[str, JsonValue] | None = None,
+    logical_cohort: CohortDefinitionIdentity | None = None,
 ) -> tuple[ExperimentProcessTask, ...]:
     """Create deterministic tasks that keep shared specs together for target chunks."""
     if not specifications or not target_issues:
@@ -115,7 +134,7 @@ def build_process_tasks(
                 for spec in specifications
                 if seed in spec.seeds
             )
-            for offset in range(0, len(target_issues), chunk_size):
+            for task_index, offset in enumerate(range(0, len(target_issues), chunk_size)):
                 chunk = tuple(str(issue) for issue in target_issues[offset : offset + chunk_size])
                 task_id = f"targets-{chunk[0]}-{chunk[-1]}-seed-{seed}"
                 tasks.append(
@@ -124,6 +143,9 @@ def build_process_tasks(
                         partition_mode=partition_mode,
                         experiment_specs=specs,
                         target_issues=chunk,
+                        logical_cohort=logical_cohort,
+                        task_index=task_index,
+                        task_targets_sha256=task_targets_sha256(chunk),
                         seed=seed,
                         deterministic_subseed=deterministic_subseed(master_seed, task_id, seed),
                         parameters=dict(parameters or {}),
@@ -132,7 +154,7 @@ def build_process_tasks(
     else:
         for spec in specifications:
             for seed in spec.seeds:
-                for offset in range(0, len(target_issues), chunk_size):
+                for task_index, offset in enumerate(range(0, len(target_issues), chunk_size)):
                     chunk = tuple(
                         str(issue) for issue in target_issues[offset : offset + chunk_size]
                     )
@@ -143,6 +165,9 @@ def build_process_tasks(
                             partition_mode=partition_mode,
                             experiment_specs=(spec.model_copy(update={"seeds": (seed,)}),),
                             target_issues=chunk,
+                            logical_cohort=logical_cohort,
+                            task_index=task_index,
+                            task_targets_sha256=task_targets_sha256(chunk),
                             seed=seed,
                             deterministic_subseed=deterministic_subseed(master_seed, task_id, seed),
                             parameters=dict(parameters or {}),

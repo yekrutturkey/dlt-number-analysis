@@ -1,0 +1,38 @@
+{
+  "bank_generation_called": false,
+  "benchmark_version": "v0.5.6-logical-cohort-smoke-v1",
+  "candidate_generation_called": false,
+  "chunk_size": 2,
+  "cohort_definition_sha256": "ec201fd88465ceb2bfcb2c7e31d989b3b9fb1a830859ff6ea209d686e0e85c9e",
+  "completed_target_count": 6,
+  "error": null,
+  "evaluation_mode": "raw_observation",
+  "execution": {
+    "cpu_seconds": 0.96875,
+    "gc_collection_counts": [
+      54,
+      5,
+      0
+    ],
+    "memory_error": null,
+    "memory_scope": "isolated_subprocess_peak",
+    "peak_memory_mb": 117.20703125,
+    "process_exit_status": 0,
+    "timed_out": false,
+    "wall_clock_seconds": 1.0496067999920342
+  },
+  "generation_called": false,
+  "observation_count_added": 0,
+  "parquet_hashes_unchanged": true,
+  "pending_target_count": 0,
+  "portfolio_scoring_method": "numpy_vectorized",
+  "process_count": 1,
+  "profile": "fast",
+  "resume_validation": "read_only_no_generation",
+  "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。",
+  "run_context_sha256": "8c4a54ad4307985f7e5300cdc637e285bb940ff4d50a50d817f8bdfba3aae07a",
+  "scheduled_task_count": 0,
+  "schema_version": "v0.5.3",
+  "status": "completed",
+  "validation_mode": "resume_read_only"
+}

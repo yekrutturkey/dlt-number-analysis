@@ -27,6 +27,7 @@ from dlt_number_analysis.experiments.statistics import (
     performance_by_seed,
     performance_by_year,
 )
+from dlt_number_analysis.experiments.storage import STORAGE_SCHEMA_VERSION
 
 
 class ExperimentComparison(BaseModel):
@@ -36,6 +37,7 @@ class ExperimentComparison(BaseModel):
 
     phase: str
     cohort_id: str
+    cohort_definition_sha256: str = "unknown"
     run_context_sha256: str = "unknown"
     history_sha256: str = "unknown"
     evaluation_mode: str = "unknown"
@@ -75,6 +77,7 @@ class RawObservationStatistics:
 _REPORT_CONTEXT_COLUMNS: tuple[str, ...] = (
     "phase",
     "cohort_id",
+    "cohort_definition_sha256",
     "run_context_sha256",
     "history_sha256",
     "evaluation_mode",
@@ -95,6 +98,7 @@ def _formal_observations(observations: pd.DataFrame) -> pd.DataFrame:
 def _ensure_report_identity_columns(observations: pd.DataFrame) -> pd.DataFrame:
     result = observations.copy()
     defaults = {
+        "cohort_definition_sha256": "unknown",
         "run_context_sha256": "unknown",
         "history_sha256": "unknown",
         "evaluation_mode": "unknown",
@@ -163,6 +167,20 @@ def assign_observation_cohorts(observations: pd.DataFrame) -> pd.DataFrame:
     if "cohort_id" not in annotated:
         annotated["cohort_id"] = ""
     annotated["cohort_id"] = annotated["cohort_id"].fillna("").astype(str)
+    if "storage_schema_version" in annotated:
+        schema_v3 = annotated["storage_schema_version"].astype(str).eq(STORAGE_SCHEMA_VERSION)
+        invalid_v3_id = schema_v3 & annotated["cohort_id"].str.strip().eq("")
+        invalid_v3_hash = schema_v3 & ~annotated["cohort_definition_sha256"].str.fullmatch(
+            r"[0-9a-f]{64}"
+        )
+        if invalid_v3_id.any() or invalid_v3_hash.any():
+            raise ValueError(
+                "schema_v3 observations require explicit cohort_id and "
+                "cohort_definition_sha256; cohort inference is forbidden"
+            )
+    else:
+        schema_v3 = pd.Series(False, index=annotated.index)
+    annotated["cohort_identity_source"] = "explicit"
     unassigned = annotated["cohort_id"].eq("")
     issues = pd.to_numeric(annotated["target_issue"], errors="raise")
     paired_smoke = (
@@ -172,6 +190,8 @@ def assign_observation_cohorts(observations: pd.DataFrame) -> pd.DataFrame:
         & issues.between(8009, 8108)
     )
     annotated.loc[paired_smoke, "cohort_id"] = "v051_paired_smoke_100"
+    annotated.loc[paired_smoke, "cohort_identity_source"] = "legacy_inferred"
+    annotated.loc[paired_smoke, "formal_inference_eligible"] = False
     single_smoke = (
         annotated["cohort_id"].eq("")
         & annotated["phase"].eq("development")
@@ -179,6 +199,8 @@ def assign_observation_cohorts(observations: pd.DataFrame) -> pd.DataFrame:
         & issues.eq(8008)
     )
     annotated.loc[single_smoke, "cohort_id"] = "single_correctness_smoke"
+    annotated.loc[single_smoke, "cohort_identity_source"] = "legacy_inferred"
+    annotated.loc[single_smoke, "formal_inference_eligible"] = False
 
     remaining = annotated.loc[annotated["cohort_id"].eq("")]
     if remaining.empty:
@@ -241,13 +263,27 @@ def assign_observation_cohorts(observations: pd.DataFrame) -> pd.DataFrame:
         )
         context = tuple(str(value) for value in key[:5])
         annotated.loc[mask, "cohort_id"] = cohort_by_signature[(context, targets)]
+        annotated.loc[mask, "cohort_identity_source"] = "legacy_inferred"
+        annotated.loc[mask, "formal_inference_eligible"] = False
     return annotated
+
+
+def validate_single_formal_report_context(observations: pd.DataFrame) -> None:
+    """Reject a formal conclusion assembled from mixed logical identities."""
+    if observations.empty:
+        raise ValueError("formal report selection contains no observations")
+    annotated = assign_observation_cohorts(observations)
+    contexts = annotated.loc[:, list(_REPORT_CONTEXT_COLUMNS)].drop_duplicates()
+    if len(contexts) != 1:
+        raise ValueError(
+            "formal report selection mixes cohort, run, history, evaluation, or profile contexts"
+        )
 
 
 def _cohort_common_target_counts(
     observations: pd.DataFrame,
-) -> dict[tuple[str, str, str, str, str, str], int]:
-    common: dict[tuple[str, str, str, str, str, str], int] = {}
+) -> dict[tuple[str, ...], int]:
+    common: dict[tuple[str, ...], int] = {}
     for raw_key, cohort in observations.groupby(list(_REPORT_CONTEXT_COLUMNS), sort=True):
         target_sets = [
             set(group["target_issue"].astype(str))
@@ -335,6 +371,7 @@ def compare_to_constraint_matched_baseline(
         (
             phase,
             cohort_id,
+            cohort_definition_sha256,
             run_context_sha256,
             history_sha256,
             evaluation_mode,
@@ -372,6 +409,7 @@ def compare_to_constraint_matched_baseline(
                     ExperimentComparison(
                         phase=str(phase),
                         cohort_id=str(cohort_id),
+                        cohort_definition_sha256=cohort_definition_sha256,
                         run_context_sha256=run_context_sha256,
                         history_sha256=history_sha256,
                         evaluation_mode=evaluation_mode,
@@ -398,6 +436,7 @@ def compare_to_constraint_matched_baseline(
             (
                 comparison.phase,
                 comparison.cohort_id,
+                comparison.cohort_definition_sha256,
                 comparison.run_context_sha256,
                 comparison.history_sha256,
                 comparison.evaluation_mode,
@@ -406,12 +445,21 @@ def compare_to_constraint_matched_baseline(
             for comparison in comparisons
         }
     )
-    for phase, cohort_id, run_hash, history_hash, evaluation_mode, profile in families:
+    for (
+        phase,
+        cohort_id,
+        cohort_hash,
+        run_hash,
+        history_hash,
+        evaluation_mode,
+        profile,
+    ) in families:
         family = [
             comparison
             for comparison in comparisons
             if comparison.phase == phase
             and comparison.cohort_id == cohort_id
+            and comparison.cohort_definition_sha256 == cohort_hash
             and comparison.run_context_sha256 == run_hash
             and comparison.history_sha256 == history_hash
             and comparison.evaluation_mode == evaluation_mode

@@ -54,9 +54,16 @@ def execute_experiment_process_task(
             str(parameters["holdout_lock_path"]) if "holdout_lock_path" in parameters else None
         ),
         target_issues=task.target_issues,
+        logical_cohort=task.logical_cohort,
+        require_logical_cohort=task.logical_cohort is not None,
+        task_id=task.task_id,
+        task_index=task.task_index,
+        task_targets_sha256_value=task.task_targets_sha256,
     )
     return {
         "task_id": task.task_id,
+        "task_index": task.task_index,
+        "task_targets_sha256": task.task_targets_sha256,
         "deterministic_subseed": task.deterministic_subseed,
         "observations_json": result.observations.to_json(
             orient="records",

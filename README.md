@@ -1,5 +1,47 @@
 # dlt-number-analysis
 
+## v0.5.6：逻辑 cohort、schema_v3 与正式 preflight
+
+v0.5.6 将完整科学目标集合与调度 task chunk 分离。控制器在分块之前创建
+`CohortDefinitionIdentity`；`cohort_definition_sha256` 由身份版本、用途、阶段、cohort ID、
+规范化完整期号列表及其计数和边界计算，不包含 chunk 大小、worker 数、任务顺序或续跑的
+pending 集合。worker 只计算自己的 chunk，但所有输出行保留同一完整逻辑 cohort 身份。
+
+新的正式结果默认写入：
+
+`outputs/experiments/schema_v3/{phase}/{experiment_id}/{experiment_version}/<run-hash>/<execution-hash>/<cohort-hash>/seed_<seed>/`
+
+schema_v3 主键为
+`experiment_id + experiment_version + execution_config_sha256 + cohort_definition_sha256 + phase + seed + target_issue`。
+schema_v2 和 legacy 结果继续只读兼容，不自动迁移、重写或参与 schema_v3 正式报告。
+
+正式长任务应先运行只读 preflight；正式模式拒绝脏工作区，只有 smoke 加
+`--allow-dirty` 才能显式覆盖：
+
+```powershell
+uv run python scripts/run_v05_experiments.py --experiment-ids B1 B2 B3 B4 B5 B6 --preflight-only
+```
+
+report-only 必须精确指定一个 run context 和一个逻辑 cohort，不会扫描合并全部结果：
+
+```powershell
+uv run python scripts/run_v05_experiments.py --experiment-ids B1 B2 B3 B4 B5 B6 `
+  --report-only `
+  --run-context-sha256 <64位SHA256> `
+  --cohort-definition-sha256 <64位SHA256>
+```
+
+v0.5.6 仅允许的验证入口分为一次实际 6 期双分块 smoke、一次只读续跑检查和一次精确
+report-only；后两步不调用候选或银行生成：
+
+```powershell
+uv run python scripts/run_v056_cohort_smoke.py
+uv run python scripts/run_v056_cohort_smoke.py --resume-check-only --chunk-size 2
+uv run python scripts/run_v056_cohort_smoke.py --report-only `
+  --run-context-sha256 <64位SHA256> `
+  --cohort-definition-sha256 <64位SHA256>
+```
+
 ## v0.5.5: formal experiment identity and schema_v2 isolation
 
 Formal observations now use two audit identities. `run_context_sha256` binds the frozen
@@ -149,8 +191,10 @@ uv run python scripts/run_v051_paired_smoke.py --workers 8 --chunk-size 13
 uv run python scripts/run_v05_experiments.py `
   --experiment-ids B1 --phase development --target-issues 08008 --workers 1
 
-# 只从 Parquet 分区汇总报告，不运行实验
-uv run python scripts/run_v05_experiments.py --report-only
+# 只从一个精确 schema_v3 run/cohort 分区汇总报告，不运行实验
+uv run python scripts/run_v05_experiments.py --report-only `
+  --run-context-sha256 <64位SHA256> `
+  --cohort-definition-sha256 <64位SHA256>
 
 # 非破坏性重建历史完整性报告
 uv run python scripts/audit_verified_history.py

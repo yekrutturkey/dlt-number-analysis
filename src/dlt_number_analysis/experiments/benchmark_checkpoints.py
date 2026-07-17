@@ -175,12 +175,16 @@ def benchmark_probe_worker(
     *,
     delay_seconds: float = 0.0,
     value: str = "ok",
+    return_reserved_fields: bool = False,
 ) -> Mapping[str, object]:
     """Minimal deterministic worker used to verify active timeout semantics."""
     if delay_seconds < 0:
         raise ValueError("probe delay must be non-negative")
     time.sleep(delay_seconds)
-    return {"probe_value": value}
+    result = {"probe_value": value}
+    if return_reserved_fields:
+        result.update({"schema_version": "worker-value", "status": "worker-value"})
+    return result
 
 
 def _isolated_worker_entry(
@@ -217,12 +221,12 @@ def _isolated_worker_entry(
     atomic_write_json(
         checkpoint_path,
         {
+            **result,
             "schema_version": BENCHMARK_SCHEMA_VERSION,
             **checkpoint_identity,
             "status": status,
             "error": error,
             "execution": metrics.model_dump(mode="json"),
-            **result,
         },
     )
     if exit_status:

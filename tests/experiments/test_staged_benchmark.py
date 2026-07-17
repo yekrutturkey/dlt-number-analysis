@@ -78,6 +78,23 @@ def test_completed_stage_is_saved_immediately_and_reused(tmp_path: Path) -> None
     assert load_checkpoint(path)["probe_value"] == "saved"
 
 
+def test_worker_result_cannot_override_checkpoint_reserved_fields(tmp_path: Path) -> None:
+    path = tmp_path / "reserved.json"
+    outcome = run_isolated_stage(
+        stage="reserved_probe",
+        worker_path=PROBE_WORKER,
+        worker_kwargs={"return_reserved_fields": True},
+        checkpoint_path=path,
+        checkpoint_identity=_identity(),
+        timeout_seconds=5,
+    )
+    saved = load_checkpoint(path, expected_identity=_identity())
+
+    assert outcome.status == "completed"
+    assert saved["schema_version"] == BENCHMARK_SCHEMA_VERSION
+    assert saved["status"] == "completed"
+
+
 def test_timeout_actively_terminates_child_and_preserves_other_checkpoint(
     tmp_path: Path,
 ) -> None:

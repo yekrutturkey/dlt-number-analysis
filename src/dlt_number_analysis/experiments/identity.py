@@ -19,7 +19,7 @@ from dlt_number_analysis.pipeline import PROFILE_DEFAULTS, PipelineProfile
 from dlt_number_analysis.portfolio import PortfolioScoringMethod
 
 EXECUTION_IDENTITY_SCHEMA_VERSION = "experiment-execution-identity-v2"
-RUNNER_VERSION = "shared-feasible-bank-runner-v0.5.5"
+RUNNER_VERSION = "shared-feasible-bank-runner-v0.5.6"
 SCORING_IMPLEMENTATION_VERSION = "number-and-structure-scoring-v0.5.5"
 RAW_EVALUATION_SEMANTICS_VERSION = "raw-observation-v1"
 FULL_RESAMPLING_SEMANTICS_VERSION = "full-resampling-v1"

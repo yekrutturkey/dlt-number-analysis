@@ -25,6 +25,10 @@ from dlt_number_analysis.data import (
 )
 from dlt_number_analysis.evaluation import IssuePrizeRecord, PrizeTable
 from dlt_number_analysis.experiments.benchmark_checkpoints import peak_process_memory_mb
+from dlt_number_analysis.experiments.cohort import (
+    CohortDefinitionIdentity,
+    task_targets_sha256,
+)
 from dlt_number_analysis.experiments.identity import (
     EXECUTION_IDENTITY_SCHEMA_VERSION,
     RUNNER_VERSION,
@@ -44,7 +48,10 @@ from dlt_number_analysis.experiments.splits import (
     finalize_holdout_lock,
     split_history,
 )
-from dlt_number_analysis.experiments.storage import STORAGE_SCHEMA_VERSION
+from dlt_number_analysis.experiments.storage import (
+    STORAGE_SCHEMA_VERSION,
+    STORAGE_SCHEMA_VERSION_V2,
+)
 from dlt_number_analysis.models import PredictionRecord
 from dlt_number_analysis.pipeline import PROFILE_DEFAULTS, PipelineConfig, PipelineProfile
 from dlt_number_analysis.portfolio import (
@@ -246,12 +253,19 @@ def _shared_bank_experiment_batch(
     maximum_bank_search_trials: int = 80_000,
     portfolio_scoring_method: PortfolioScoringMethod = "numpy_vectorized",
     evaluation_mode: EvaluationMode = "full_resampling",
+    logical_cohort: CohortDefinitionIdentity | None = None,
+    require_logical_cohort: bool = False,
+    task_id: str | None = None,
+    task_index: int | None = None,
+    task_targets_sha256_value: str | None = None,
 ) -> ExperimentBatchResult:
     """Run B1-B6 target-first so candidates and feasible banks are truly shared."""
     if evaluation_mode not in {"raw_observation", "full_resampling"}:
         raise ValueError(f"unsupported evaluation mode: {evaluation_mode}")
     if not specifications:
         return ExperimentBatchResult(pd.DataFrame(), (), ())
+    if require_logical_cohort and logical_cohort is None:
+        raise ValueError("schema-v3 formal execution requires an explicit logical cohort")
     allowed_ids = {f"B{index}" for index in range(1, 7)}
     is_ablation = all(
         spec.experiment_version == "v0.5.1-ablation-shared-v1" for spec in specifications
@@ -259,6 +273,8 @@ def _shared_bank_experiment_batch(
     if not is_ablation and any(spec.experiment_id not in allowed_ids for spec in specifications):
         raise ValueError("shared feasible-bank execution requires B1-B6 or v0.5.1 ablations")
     first = specifications[0]
+    if logical_cohort is not None and logical_cohort.payload.phase != first.data_split.phase:
+        raise ValueError("logical cohort phase differs from experiment phase")
     if any(spec.data_split != first.data_split for spec in specifications):
         raise ValueError("shared bank experiments must use the same temporal split")
     if any(spec.seeds != first.seeds for spec in specifications):
@@ -312,11 +328,28 @@ def _shared_bank_experiment_batch(
         if missing:
             raise ValueError(f"requested targets are outside the declared phase: {sorted(missing)}")
     target_issue_sequence = tuple(str(validated.iloc[index]["issue"]) for index in target_indices)
-    cohort_id = (
-        "development_full"
-        if allowed_targets is None and first.data_split.phase == "development"
-        else _target_cohort_id(first.data_split.phase, target_issue_sequence)
-    )
+    if logical_cohort is not None:
+        cohort_targets = set(logical_cohort.payload.ordered_target_issues)
+        if not set(target_issue_sequence).issubset(cohort_targets):
+            raise ValueError("worker target chunk is outside the logical cohort")
+        if not target_issue_sequence:
+            raise ValueError("worker target chunk cannot be empty")
+        expected_task_hash = task_targets_sha256(target_issue_sequence)
+        if (
+            task_targets_sha256_value is not None
+            and task_targets_sha256_value != expected_task_hash
+        ):
+            raise ValueError("worker task target hash differs from selected target rows")
+        cohort_id = logical_cohort.payload.cohort_id
+    else:
+        expected_task_hash = (
+            task_targets_sha256(target_issue_sequence) if target_issue_sequence else None
+        )
+        cohort_id = (
+            "development_full"
+            if allowed_targets is None and first.data_split.phase == "development"
+            else _target_cohort_id(first.data_split.phase, target_issue_sequence)
+        )
 
     profile_defaults = PROFILE_DEFAULTS[profile]
     objective = PipelineConfig(profile=profile)
@@ -580,6 +613,11 @@ def _shared_bank_experiment_batch(
                             "run_context_sha256": execution_identity.run_context_sha256,
                             "execution_config_sha256": (execution_identity.execution_config_sha256),
                             "history_sha256": run_context.payload.history_sha256,
+                            "cohort_definition_sha256": (
+                                logical_cohort.cohort_definition_sha256
+                                if logical_cohort is not None
+                                else None
+                            ),
                             "requested_portfolio_scoring_method": portfolio_scoring_method,
                             "evaluation_mode": evaluation_mode,
                             "scorer_spec": spec.scorer_spec.model_dump(mode="json"),
@@ -688,13 +726,43 @@ def _shared_bank_experiment_batch(
                         "history_sha256": run_context.payload.history_sha256,
                         "git_commit_sha": git_commit_sha,
                         "requested_portfolio_scoring_method": portfolio_scoring_method,
-                        "storage_schema_version": STORAGE_SCHEMA_VERSION,
+                        "storage_schema_version": (
+                            STORAGE_SCHEMA_VERSION
+                            if logical_cohort is not None
+                            else STORAGE_SCHEMA_VERSION_V2
+                        ),
                         "identity_status": "formal_verified",
                         "formal_inference_eligible": True,
                         "phase": spec.data_split.phase,
                         "evaluation_mode": evaluation_mode,
                         "profile": profile,
                         "cohort_id": cohort_id,
+                        **(
+                            {
+                                "cohort_definition_json": logical_cohort.model_dump_json(),
+                                "cohort_identity_schema_version": (
+                                    logical_cohort.payload.cohort_identity_schema_version
+                                ),
+                                "cohort_purpose": logical_cohort.payload.cohort_purpose,
+                                "cohort_definition_sha256": (
+                                    logical_cohort.cohort_definition_sha256
+                                ),
+                                "expected_targets_sha256": (
+                                    logical_cohort.payload.expected_targets_sha256
+                                ),
+                                "cohort_target_count": logical_cohort.payload.target_count,
+                                "cohort_start_issue": logical_cohort.payload.start_issue,
+                                "cohort_end_issue": logical_cohort.payload.end_issue,
+                                "task_id": task_id,
+                                "task_index": task_index,
+                                "task_targets_sha256": (
+                                    task_targets_sha256_value or expected_task_hash
+                                ),
+                                "task_target_count": len(target_issue_sequence),
+                            }
+                            if logical_cohort is not None
+                            else {}
+                        ),
                         "seed": seed,
                         "prediction_random_seed": predictions[strategy_name].random_seed,
                         "prediction_model_version": predictions[strategy_name].model_version,
@@ -891,7 +959,7 @@ def _run_legacy_experiment(
                     "profile": profile,
                     "portfolio_scoring_method": "object_reference",
                     "requested_portfolio_scoring_method": "object_reference",
-                    "storage_schema_version": STORAGE_SCHEMA_VERSION,
+                    "storage_schema_version": STORAGE_SCHEMA_VERSION_V2,
                     "identity_status": "formal_verified",
                     "formal_inference_eligible": True,
                     "phase": spec.data_split.phase,
@@ -947,6 +1015,11 @@ def run_experiment(
     maximum_bank_search_trials: int = 80_000,
     portfolio_scoring_method: PortfolioScoringMethod = "numpy_vectorized",
     evaluation_mode: EvaluationMode = "full_resampling",
+    logical_cohort: CohortDefinitionIdentity | None = None,
+    require_logical_cohort: bool = False,
+    task_id: str | None = None,
+    task_index: int | None = None,
+    task_targets_sha256_value: str | None = None,
 ) -> ExperimentBatchResult:
     """Run one experiment, routing B1-B6 through the shared feasible-bank path."""
     options = {
@@ -970,12 +1043,19 @@ def run_experiment(
             maximum_bank_search_trials=maximum_bank_search_trials,
             portfolio_scoring_method=portfolio_scoring_method,
             evaluation_mode=evaluation_mode,
+            logical_cohort=logical_cohort,
+            require_logical_cohort=require_logical_cohort,
+            task_id=task_id,
+            task_index=task_index,
+            task_targets_sha256_value=task_targets_sha256_value,
             **options,
         )
     if evaluation_mode != "full_resampling":
         raise ValueError("raw_observation evaluation is supported only by shared B1-B6")
     if target_issues is not None:
         raise ValueError("target_issues filtering is currently restricted to B1-B6")
+    if logical_cohort is not None or require_logical_cohort:
+        raise ValueError("schema-v3 logical cohorts currently require shared B1-B6 execution")
     return _run_legacy_experiment(draws, spec, **options)
 
 

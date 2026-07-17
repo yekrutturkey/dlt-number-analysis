@@ -30,7 +30,8 @@ EXPERIMENT_PRIMARY_KEY: tuple[str, ...] = (
     "target_issue",
 )
 
-STORAGE_SCHEMA_VERSION = "experiment-storage-schema-v2"
+STORAGE_SCHEMA_VERSION_V2 = "experiment-storage-schema-v2"
+STORAGE_SCHEMA_VERSION = "experiment-storage-schema-v3"
 EXPERIMENT_PRIMARY_KEY_V2: tuple[str, ...] = (
     "experiment_id",
     "experiment_version",
@@ -187,7 +188,7 @@ class FormalPartitionManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    storage_schema_version: str = STORAGE_SCHEMA_VERSION
+    storage_schema_version: str = STORAGE_SCHEMA_VERSION_V2
     experiment_id: str
     experiment_version: str
     experiment_config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

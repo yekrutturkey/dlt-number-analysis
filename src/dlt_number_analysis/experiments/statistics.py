@@ -248,6 +248,7 @@ def performance_by_year(results: pd.DataFrame) -> pd.DataFrame:
         for column in (
             "phase",
             "cohort_id",
+            "cohort_definition_sha256",
             "run_context_sha256",
             "history_sha256",
             "evaluation_mode",
@@ -265,6 +266,7 @@ def performance_by_seed(results: pd.DataFrame) -> pd.DataFrame:
         for column in (
             "phase",
             "cohort_id",
+            "cohort_definition_sha256",
             "run_context_sha256",
             "history_sha256",
             "evaluation_mode",
