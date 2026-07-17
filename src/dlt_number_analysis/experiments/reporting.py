@@ -27,7 +27,10 @@ from dlt_number_analysis.experiments.statistics import (
     performance_by_seed,
     performance_by_year,
 )
-from dlt_number_analysis.experiments.storage import STORAGE_SCHEMA_VERSION
+from dlt_number_analysis.experiments.storage import (
+    STORAGE_SCHEMA_VERSION,
+    STORAGE_SCHEMA_VERSION_V4,
+)
 
 
 class ExperimentComparison(BaseModel):
@@ -168,7 +171,11 @@ def assign_observation_cohorts(observations: pd.DataFrame) -> pd.DataFrame:
         annotated["cohort_id"] = ""
     annotated["cohort_id"] = annotated["cohort_id"].fillna("").astype(str)
     if "storage_schema_version" in annotated:
-        schema_v3 = annotated["storage_schema_version"].astype(str).eq(STORAGE_SCHEMA_VERSION)
+        schema_v3 = (
+            annotated["storage_schema_version"]
+            .astype(str)
+            .isin((STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION_V4))
+        )
         invalid_v3_id = schema_v3 & annotated["cohort_id"].str.strip().eq("")
         invalid_v3_hash = schema_v3 & ~annotated["cohort_definition_sha256"].str.fullmatch(
             r"[0-9a-f]{64}"

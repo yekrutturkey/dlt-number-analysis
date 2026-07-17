@@ -23,3 +23,9 @@ outputs/reports/*
 !outputs/reports/*.md
 !outputs/reports/ablation_results.csv
 !outputs/reports/v051_paired_smoke_comparisons.csv
+
+# v0.5.7 resumable formal-run artifacts (source and tracked audits stay visible)
+outputs/experiments/schema_v4/
+outputs/experiments/run_plans/
+outputs/experiments/run_metadata/
+outputs/formal_runs/

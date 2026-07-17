@@ -1,9 +1,10 @@
-"""Resumable schema-v3 experiment command with exact logical-cohort boundaries."""
+"""Resumable schema-v4 experiment command with mandatory formal preflight."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import cast
@@ -17,6 +18,7 @@ from dlt_number_analysis.experiments.cohort import (
     CohortPurpose,
     build_cohort_definition_identity,
 )
+from dlt_number_analysis.experiments.git_audit import AuthorizedGeneratedPath
 from dlt_number_analysis.experiments.identity import (
     ExperimentExecutionIdentity,
     RunContextIdentity,
@@ -35,6 +37,7 @@ from dlt_number_analysis.experiments.reporting import (
     write_experiment_summary_report,
     write_holdout_results_report,
 )
+from dlt_number_analysis.experiments.run_lock import FormalRunLock, clear_stale_run_lock
 from dlt_number_analysis.experiments.scheduler import (
     ProcessSchedulerReport,
     build_process_tasks,
@@ -53,10 +56,10 @@ from dlt_number_analysis.experiments.stages import (
     build_staged_ablation_plan,
     select_stage_target_issues,
 )
-from dlt_number_analysis.experiments.storage import (
-    LegacyObservationImportStore,
+from dlt_number_analysis.experiments.storage_v4 import (
+    ExperimentPartitionStatusV4,
+    ExperimentResultStoreV4,
 )
-from dlt_number_analysis.experiments.storage_v3 import ExperimentResultStoreV3
 from dlt_number_analysis.experiments.worker import execute_experiment_process_task
 from dlt_number_analysis.pipeline import PROFILE_DEFAULTS
 
@@ -105,10 +108,17 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("object_reference", "numpy_vectorized"),
         default="numpy_vectorized",
     )
-    parser.add_argument("--report-only", action="store_true")
-    parser.add_argument("--preflight-only", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--report-only", action="store_true")
+    modes.add_argument("--preflight-only", action="store_true")
+    modes.add_argument("--all-contexts-audit", action="store_true")
+    modes.add_argument("--audit-generations", action="store_true")
+    modes.add_argument("--repair-current", action="store_true")
+    modes.add_argument("--clear-stale-run-lock", action="store_true")
     parser.add_argument("--allow-dirty", action="store_true")
-    parser.add_argument("--all-contexts-audit", action="store_true")
+    parser.add_argument("--repair-generation-id")
+    parser.add_argument("--repair-reason")
+    parser.add_argument("--stale-lock-reason")
     parser.add_argument("--run-context-sha256")
     parser.add_argument("--cohort-definition-sha256")
     parser.add_argument("--cohort-id")
@@ -147,7 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--results-root",
         type=Path,
-        default=PROJECT_ROOT / "outputs/experiments/schema_v3",
+        default=PROJECT_ROOT / "outputs/experiments/schema_v4",
     )
     parser.add_argument(
         "--preflight-root",
@@ -157,39 +167,125 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--contexts-audit-output",
         type=Path,
-        default=PROJECT_ROOT / "outputs/experiments/schema_v3/context_index.csv",
+        default=None,
     )
     parser.add_argument(
         "--summary-output",
         type=Path,
-        default=PROJECT_ROOT / "outputs/reports/experiment_summary.md",
+        default=None,
     )
     parser.add_argument(
         "--ablation-output",
         type=Path,
-        default=PROJECT_ROOT / "outputs/reports/ablation_results.csv",
+        default=None,
     )
     parser.add_argument(
         "--holdout-output",
         type=Path,
-        default=PROJECT_ROOT / "outputs/reports/holdout_results.md",
+        default=None,
     )
     parser.add_argument(
         "--scheduler-report-dir",
         type=Path,
-        default=PROJECT_ROOT / "outputs/experiments/run_metadata",
+        default=None,
     )
     parser.add_argument(
         "--experiment-runtime-output",
         type=Path,
-        default=PROJECT_ROOT / "outputs/reports/experiment_runtime.md",
+        default=None,
     )
+    parser.add_argument("--run-log-dir", type=Path)
     parser.add_argument(
         "--holdout-lock",
         type=Path,
         default=PROJECT_ROOT / "outputs/experiments/final_holdout/holdout_lock.json",
     )
     return parser
+
+
+def _resolve_output_paths(
+    args: argparse.Namespace,
+    *,
+    run_context_sha256: str,
+    cohort_definition_sha256: str,
+) -> tuple[Path, tuple[AuthorizedGeneratedPath, ...]]:
+    """Resolve identity-scoped defaults and exact Git-authorized output paths."""
+    formal_root = (
+        PROJECT_ROOT / "outputs/formal_runs" / run_context_sha256 / cohort_definition_sha256
+    )
+    explicit = {
+        name: getattr(args, name) is not None
+        for name in (
+            "contexts_audit_output",
+            "summary_output",
+            "ablation_output",
+            "holdout_output",
+            "scheduler_report_dir",
+            "experiment_runtime_output",
+            "run_log_dir",
+        )
+    }
+    args.contexts_audit_output = args.contexts_audit_output or (
+        formal_root / "reports/context_index.csv"
+    )
+    args.summary_output = args.summary_output or (formal_root / "reports/experiment_summary.md")
+    args.ablation_output = args.ablation_output or (formal_root / "reports/ablation_results.csv")
+    args.holdout_output = args.holdout_output or (formal_root / "reports/holdout_results.md")
+    args.scheduler_report_dir = args.scheduler_report_dir or (formal_root / "scheduler")
+    args.experiment_runtime_output = args.experiment_runtime_output or (
+        formal_root / "runtime/experiment_runtime.md"
+    )
+    args.run_log_dir = args.run_log_dir or (formal_root / "logs")
+    default_results = PROJECT_ROOT / "outputs/experiments/schema_v4"
+    default_preflight = PROJECT_ROOT / "outputs/experiments/run_plans"
+    authorized: list[AuthorizedGeneratedPath] = [
+        AuthorizedGeneratedPath(
+            path=args.results_root,
+            kind="directory",
+            explicitly_provided=args.results_root != default_results,
+        ),
+        AuthorizedGeneratedPath(
+            path=args.preflight_root,
+            kind="directory",
+            explicitly_provided=args.preflight_root != default_preflight,
+        ),
+        AuthorizedGeneratedPath(
+            path=args.scheduler_report_dir,
+            kind="directory",
+            explicitly_provided=explicit["scheduler_report_dir"],
+        ),
+        AuthorizedGeneratedPath(
+            path=args.run_log_dir,
+            kind="directory",
+            explicitly_provided=explicit["run_log_dir"],
+        ),
+        AuthorizedGeneratedPath(
+            path=args.summary_output,
+            kind="file",
+            explicitly_provided=explicit["summary_output"],
+        ),
+        AuthorizedGeneratedPath(
+            path=args.experiment_runtime_output,
+            kind="file",
+            explicitly_provided=explicit["experiment_runtime_output"],
+        ),
+        AuthorizedGeneratedPath(
+            path=args.ablation_output,
+            kind="file",
+            explicitly_provided=explicit["ablation_output"],
+        ),
+        AuthorizedGeneratedPath(
+            path=args.holdout_output,
+            kind="file",
+            explicitly_provided=explicit["holdout_output"],
+        ),
+        AuthorizedGeneratedPath(
+            path=args.contexts_audit_output,
+            kind="file",
+            explicitly_provided=explicit["contexts_audit_output"],
+        ),
+    ]
+    return formal_root, tuple(authorized)
 
 
 def _selected_specifications(args: argparse.Namespace) -> tuple[ExperimentSpec, ...]:
@@ -252,7 +348,7 @@ def _expected_targets(
 
 
 def _pending_groups(
-    store: ExperimentResultStoreV3,
+    store: ExperimentResultStoreV4,
     specifications: tuple[ExperimentSpec, ...],
     targets_by_experiment: dict[str, tuple[str, ...]],
     identities_by_experiment: dict[str, ExperimentExecutionIdentity],
@@ -360,24 +456,26 @@ def _frames_from_scheduler_results(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Preflight, execute, resume, or report one exact schema-v3 logical cohort."""
+    """Preflight, execute, resume, audit, repair, or report one schema-v4 cohort."""
     args = build_parser().parse_args(argv)
-    specifications = _selected_specifications(args)
-    store = ExperimentResultStoreV3(args.results_root)
-    if args.migrate_legacy_observations:
-        if not args.legacy_observations.exists():
-            raise ValueError(f"legacy observations do not exist: {args.legacy_observations}")
-        migrated = LegacyObservationImportStore(args.legacy_import_root).import_csv(
-            args.legacy_observations
-        )
-        print(f"imported legacy_unverified observations: {migrated}")
+    if args.repair_current and (
+        args.repair_generation_id is None or not (args.repair_reason or "").strip()
+    ):
+        raise ValueError("--repair-current requires --repair-generation-id and --repair-reason")
+    if args.clear_stale_run_lock and not (args.stale_lock_reason or "").strip():
+        raise ValueError("--clear-stale-run-lock requires --stale-lock-reason")
+    store = ExperimentResultStoreV4(args.results_root)
     if args.all_contexts_audit:
+        output = args.contexts_audit_output or (
+            PROJECT_ROOT / "outputs/formal_runs/context_audits/context_index.csv"
+        )
         index = store.context_index()
-        args.contexts_audit_output.parent.mkdir(parents=True, exist_ok=True)
-        index.to_csv(args.contexts_audit_output, index=False)
-        print(f"schema-v3 context audit: {args.contexts_audit_output}")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        index.to_csv(output, index=False)
+        print(f"schema-v4 context audit: {output}")
         print(DISCLAIMER)
         return 0
+    specifications = _selected_specifications(args)
     phase = specifications[0].data_split.phase
     if any(spec.data_split.phase != phase for spec in specifications):
         raise ValueError("one command cannot mix experiment phases")
@@ -387,6 +485,11 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 "report-only requires --run-context-sha256 and --cohort-definition-sha256"
             )
+        _resolve_output_paths(
+            args,
+            run_context_sha256=args.run_context_sha256,
+            cohort_definition_sha256=args.cohort_definition_sha256,
+        )
         observations = store.load_cohort(
             run_context_sha256=args.run_context_sha256,
             cohort_definition_sha256=args.cohort_definition_sha256,
@@ -407,7 +510,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if phase == "final_holdout":
             write_holdout_results_report(observations, args.holdout_output)
-        print(f"selected schema-v3 observations: {len(observations)}")
+        print(f"selected schema-v4 observations: {len(observations)}")
         print(DISCLAIMER)
         return 0
 
@@ -426,6 +529,8 @@ def main(argv: list[str] | None = None) -> int:
     if len(target_sets) != 1:
         raise ValueError("one logical cohort requires the same complete targets for every spec")
     complete_targets = next(iter(target_sets))
+    if not complete_targets:
+        raise ValueError("logical cohort cannot be empty")
     final_holdout = phase == "final_holdout"
     evaluation_mode = args.evaluation_mode or (
         "full_resampling" if final_holdout else "raw_observation"
@@ -465,7 +570,7 @@ def main(argv: list[str] | None = None) -> int:
         contexts_by_experiment[spec.experiment_id] = run_context
     run_hashes = {context.run_context_sha256 for context in contexts_by_experiment.values()}
     if len(run_hashes) != 1:
-        raise ValueError("one schema-v3 command requires exactly one shared run context")
+        raise ValueError("one schema-v4 command requires exactly one shared run context")
     shared_context = next(iter(contexts_by_experiment.values()))
     phase_targets = (
         split_history(draws, specifications[0].data_split).phase_frame(phase)["issue"].astype(str)
@@ -490,31 +595,98 @@ def main(argv: list[str] | None = None) -> int:
         args.cohort_definition_sha256 != cohort.cohort_definition_sha256
     ):
         raise ValueError("requested cohort hash differs from the resolved logical cohort")
-
-    statuses = {
-        (spec.experiment_id, seed): store.status(
+    formal_run_root, authorized_paths = _resolve_output_paths(
+        args,
+        run_context_sha256=shared_context.run_context_sha256,
+        cohort_definition_sha256=cohort.cohort_definition_sha256,
+    )
+    generation_audits = {}
+    statuses: dict[tuple[str, int], ExperimentPartitionStatusV4] = {}
+    identity_conflicts: list[str] = []
+    for spec in specifications:
+        identity = identities_by_experiment[spec.experiment_id]
+        for seed in spec.seeds:
+            key = f"{spec.experiment_id}:seed_{seed}"
+            audit = store.audit_partition_generations(spec, identity, cohort, seed=seed)
+            generation_audits[key] = audit
+            try:
+                status = store.status(
+                    spec,
+                    identity,
+                    contexts_by_experiment[spec.experiment_id],
+                    cohort,
+                    seed=seed,
+                    expected_target_issues=complete_targets,
+                )
+            except (OSError, ValueError) as error:
+                identity_conflicts.append(f"{key}: {error}")
+                status = ExperimentPartitionStatusV4(
+                    phase=phase,
+                    experiment_id=spec.experiment_id,
+                    experiment_version=spec.experiment_version,
+                    run_context_sha256=identity.run_context_sha256,
+                    execution_config_sha256=identity.execution_config_sha256,
+                    cohort_definition_sha256=cohort.cohort_definition_sha256,
+                    expected_targets_sha256=cohort.payload.expected_targets_sha256,
+                    seed=seed,
+                    current_path=store.current_path(spec, identity, cohort, seed=seed),
+                    current_generation_id=None,
+                    completed_target_issues=(),
+                    pending_target_issues=complete_targets,
+                    is_complete=False,
+                )
+            statuses[(spec.experiment_id, seed)] = status
+    if args.audit_generations:
+        print(
+            json.dumps(
+                {key: audit.model_dump(mode="json") for key, audit in generation_audits.items()},
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+        print(DISCLAIMER)
+        return 0
+    if args.repair_current:
+        if len(specifications) != 1 or len(seeds) != 1:
+            raise ValueError("--repair-current requires exactly one experiment and one seed")
+        spec = specifications[0]
+        path = store.repair_current_pointer(
             spec,
             identities_by_experiment[spec.experiment_id],
-            contexts_by_experiment[spec.experiment_id],
             cohort,
-            seed=seed,
-            expected_target_issues=complete_targets,
+            seed=seeds[0],
+            generation_id=args.repair_generation_id,
+            reason=args.repair_reason,
         )
-        for spec in specifications
-        for seed in spec.seeds
-    }
-    pending_groups = _pending_groups(
-        store,
-        specifications,
-        targets_by_experiment,
-        identities_by_experiment,
-        contexts_by_experiment,
-        cohort,
-    )
+        print(f"CURRENT repair audit: {path}")
+        print(DISCLAIMER)
+        return 0
+    run_lock_path = formal_run_root / "RUNNING.lock"
+    if args.clear_stale_run_lock:
+        audit_path = clear_stale_run_lock(
+            run_lock_path,
+            reason=args.stale_lock_reason,
+            audit_directory=args.run_log_dir,
+        )
+        print(f"stale run lock clear audit: {audit_path}")
+        print(DISCLAIMER)
+        return 0
+
+    pending_groups: dict[tuple[int, tuple[str, ...]], list[ExperimentSpec]] = defaultdict(list)
+    for spec in specifications:
+        for seed in spec.seeds:
+            status = statuses[(spec.experiment_id, seed)]
+            if status.is_complete:
+                print(f"skip completed: {phase}/{spec.experiment_id}/seed_{seed}")
+                continue
+            pending_groups[(seed, status.pending_target_issues)].append(
+                spec.model_copy(update={"seeds": (seed,)})
+            )
     effective_chunk_size = len(complete_targets) if final_holdout else args.chunk_size
     task_plan = _task_plan_rows(pending_groups, chunk_size=effective_chunk_size)
     output_paths = [
-        store.partition_path(
+        store.current_path(
             spec,
             identities_by_experiment[spec.experiment_id],
             cohort,
@@ -536,78 +708,98 @@ def main(argv: list[str] | None = None) -> int:
         result_output_paths=output_paths,
         inference_context=args.inference_context,
         allow_dirty=args.allow_dirty,
+        authorized_generated_paths=authorized_paths,
+        generation_audits=generation_audits,
+        results_root=args.results_root,
+        legacy_migration_enabled=args.migrate_legacy_observations,
+        stage=args.stage,
+        final_holdout_report=final_holdout,
+        reads_holdout_lock=final_holdout,
+        identity_conflicts=identity_conflicts,
     )
     write_experiment_preflight(preflight, args.preflight_root)
     if args.preflight_only:
         print(f"preflight ready: {preflight.ready}")
         print(DISCLAIMER)
         return 0 if preflight.ready else 1
+    if not preflight.ready:
+        raise RuntimeError("formal experiment preflight failed; execution was not started")
 
     failures = False
     scheduler_reports: list[ProcessSchedulerReport] = []
-    for (seed, targets), grouped_specs in pending_groups.items():
-        if not targets:
-            continue
-        tasks = build_process_tasks(
-            grouped_specs,
-            targets,
-            master_seed=seed,
-            chunk_size=effective_chunk_size,
-            partition_mode=args.partition_mode,
-            logical_cohort=cohort,
-            parameters={
-                "history_path": str(args.draws.resolve()),
-                "prize_rule_path": str((PROJECT_ROOT / "config/prize_tiers.json").resolve()),
-                "profile": args.profile,
-                "minimum_history": args.minimum_history,
-                "random_baseline_seed_count": args.random_baseline_seeds,
-                "bootstrap_resamples": args.bootstrap_resamples,
-                "evaluation_mode": evaluation_mode,
-                "minimum_bank_size": args.minimum_bank_size,
-                "maximum_bank_search_trials": args.maximum_bank_search_trials,
-                "portfolio_scoring_method": args.portfolio_scoring_method,
-                "holdout_lock_path": str(args.holdout_lock.resolve()),
-            },
-        )
-        report = run_process_scheduler(
-            tasks,
-            execute_experiment_process_task,
-            workers=1 if final_holdout else args.workers,
-        )
-        scheduler_reports.append(report)
-        timestamp = report.started_at.strftime("%Y%m%dT%H%M%S%fZ")
-        write_process_scheduler_report(
-            report,
-            args.scheduler_report_dir / f"run_{timestamp}.json",
-        )
-        for frame in _frames_from_scheduler_results(report):
-            if not frame.empty:
-                store.append(frame)
-        failures = failures or bool(report.failed_tasks)
-    observations = store.load_cohort(
+    command_summary = " ".join(argv if argv is not None else sys.argv[1:])
+    lock = FormalRunLock(
+        run_lock_path,
         run_context_sha256=shared_context.run_context_sha256,
         cohort_definition_sha256=cohort.cohort_definition_sha256,
         phase=phase,
-        experiment_ids=[spec.experiment_id for spec in specifications],
         seeds=seeds,
+        command_summary=command_summary,
     )
-    validate_single_formal_report_context(observations)
-    comparisons = compare_to_constraint_matched_baseline(
-        observations,
-        minimum_paired_observations=(2 if args.inference_context == "smoke" else 30),
-    )
-    write_experiment_summary_report(
-        observations,
-        comparisons,
-        args.summary_output,
-        inference_context=args.inference_context,
-    )
-    if args.stage is not None:
-        write_ablation_results_csv(_ablation_status_rows(observations), args.ablation_output)
-    if phase == "final_holdout":
-        write_holdout_results_report(observations, args.holdout_output)
-    write_experiment_runtime_report(tuple(scheduler_reports), args.experiment_runtime_output)
-    print(f"selected schema-v3 observations: {len(observations)}")
+    with lock:
+        for (seed, targets), grouped_specs in pending_groups.items():
+            if not targets:
+                continue
+            tasks = build_process_tasks(
+                grouped_specs,
+                targets,
+                master_seed=seed,
+                chunk_size=effective_chunk_size,
+                partition_mode=args.partition_mode,
+                logical_cohort=cohort,
+                parameters={
+                    "history_path": str(args.draws.resolve()),
+                    "prize_rule_path": str((PROJECT_ROOT / "config/prize_tiers.json").resolve()),
+                    "profile": args.profile,
+                    "minimum_history": args.minimum_history,
+                    "random_baseline_seed_count": args.random_baseline_seeds,
+                    "bootstrap_resamples": args.bootstrap_resamples,
+                    "evaluation_mode": evaluation_mode,
+                    "minimum_bank_size": args.minimum_bank_size,
+                    "maximum_bank_search_trials": args.maximum_bank_search_trials,
+                    "portfolio_scoring_method": args.portfolio_scoring_method,
+                    "holdout_lock_path": str(args.holdout_lock.resolve()),
+                },
+            )
+            report = run_process_scheduler(
+                tasks,
+                execute_experiment_process_task,
+                workers=1 if final_holdout else args.workers,
+            )
+            scheduler_reports.append(report)
+            timestamp = report.started_at.strftime("%Y%m%dT%H%M%S%fZ")
+            write_process_scheduler_report(
+                report,
+                args.scheduler_report_dir / f"run_{timestamp}.json",
+            )
+            for frame in _frames_from_scheduler_results(report):
+                if not frame.empty:
+                    store.append(frame)
+            failures = failures or bool(report.failed_tasks)
+        observations = store.load_cohort(
+            run_context_sha256=shared_context.run_context_sha256,
+            cohort_definition_sha256=cohort.cohort_definition_sha256,
+            phase=phase,
+            experiment_ids=[spec.experiment_id for spec in specifications],
+            seeds=seeds,
+        )
+        validate_single_formal_report_context(observations)
+        comparisons = compare_to_constraint_matched_baseline(
+            observations,
+            minimum_paired_observations=(2 if args.inference_context == "smoke" else 30),
+        )
+        write_experiment_summary_report(
+            observations,
+            comparisons,
+            args.summary_output,
+            inference_context=args.inference_context,
+        )
+        if args.stage is not None:
+            write_ablation_results_csv(_ablation_status_rows(observations), args.ablation_output)
+        if phase == "final_holdout":
+            write_holdout_results_report(observations, args.holdout_output)
+        write_experiment_runtime_report(tuple(scheduler_reports), args.experiment_runtime_output)
+    print(f"selected schema-v4 observations: {len(observations)}")
     print(f"run_context_sha256: {shared_context.run_context_sha256}")
     print(f"cohort_definition_sha256: {cohort.cohort_definition_sha256}")
     print(DISCLAIMER)

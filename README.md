@@ -1,5 +1,47 @@
 # dlt-number-analysis
 
+## v0.5.7：generation 事务、强制 preflight 与中断恢复
+
+正式结果默认写入 `outputs/experiments/schema_v4/`。逻辑分区仍包含 phase、实验版本、
+run context、execution config、cohort 和 seed；分区内部改为不可变 generation：
+
+```text
+seed_<seed>/
+  CURRENT
+  generations/<generation_id>/
+    observations.parquet
+    manifest.json
+```
+
+每次 append 都写一个完整的新 generation，校验 Parquet SHA、manifest SHA、身份、主键和
+completed target 集后，才用 `os.replace` 原子切换 JSON `CURRENT`。`CURRENT` 保存
+`storage_schema_version`、`generation_id`、`manifest_sha256`、`updated_at`；manifest 在
+schema_v3 字段之外保存 generation/parent ID、generation 创建时间、观测数和
+`committed=true`。旧 generation 不在原地修改，也不在 append 中删除。
+
+未被 `CURRENT` 引用的 generation 是 orphan：正式读取不会选择它，也不会按 mtime
+猜测版本。使用 `--audit-generations` 只读查看；需要恢复时，必须用
+`--repair-current --repair-generation-id <id> --repair-reason <原因>` 显式选择一个已完整
+验证的 generation。修复会留下独立审计记录。不得手工修改 Parquet、manifest 或
+`CURRENT`。
+
+普通执行与 smoke 都先写 preflight v2，并在 `ready=false` 时、调度任务构造之前停止。
+Git 检查允许本次 CLI 精确声明的结果、preflight、scheduler、runtime、报告和日志路径
+存在，以便中断后 resume；`src/`、`tests/`、`scripts/`、`config/`、`data/raw/`、
+`.github/`、`.gitignore`、`pyproject.toml` 或 `uv.lock` 的变化始终阻断正式执行。
+`--allow-dirty` 只放宽 smoke 的非源代码变化，不能绕过冻结数据和配置检查。
+
+正式 development 的操作顺序是：先在干净提交上运行 `--preflight-only`，审阅精确的
+run/cohort 哈希与输出路径，再用完全相同参数普通执行。中断后重复同一命令；已由
+`CURRENT` 提交的 target 会跳过，orphan 不会被自动采用。如存在 orphan 或损坏指针，
+先执行只读 audit，再决定是否显式 repair。普通写入使用身份范围内的 `RUNNING.lock`
+防止第二个写进程；异常留下的锁只能通过
+`--clear-stale-run-lock --stale-lock-reason <原因>` 显式清理并生成审计。
+
+报告、scheduler、runtime 和日志的默认位置在身份计算后解析为
+`outputs/formal_runs/<run-hash>/<cohort-hash>/...`。V2、V3、legacy、v0.5.5 和 v0.5.6
+审计产物保持只读兼容，不会被 V4 扫描、迁移或重写。
+
 ## v0.5.6：逻辑 cohort、schema_v3 与正式 preflight
 
 v0.5.6 将完整科学目标集合与调度 task chunk 分离。控制器在分块之前创建

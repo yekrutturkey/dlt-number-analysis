@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -14,8 +15,12 @@ from dlt_number_analysis.data import (
     canonical_history_sha256,
     verified_manifest_path,
 )
-from dlt_number_analysis.experiments import command, preflight
+from dlt_number_analysis.experiments import command
 from dlt_number_analysis.experiments.cohort import build_cohort_definition_identity
+from dlt_number_analysis.experiments.git_audit import (
+    AuthorizedGeneratedPath,
+    GitStatusEntry,
+)
 from dlt_number_analysis.experiments.identity import (
     build_experiment_execution_identity,
     build_run_context_identity,
@@ -32,7 +37,10 @@ from dlt_number_analysis.experiments.reporting import (
 )
 from dlt_number_analysis.experiments.specs import baseline_experiment_specs
 from dlt_number_analysis.experiments.storage import STORAGE_SCHEMA_VERSION
-from dlt_number_analysis.experiments.storage_v3 import ExperimentPartitionStatusV3
+from dlt_number_analysis.experiments.storage_v4 import (
+    ExperimentPartitionStatusV4,
+    PartitionGenerationAudit,
+)
 
 
 def _history(count: int = 20) -> pd.DataFrame:
@@ -136,7 +144,7 @@ def _preflight_inputs(tmp_path: Path):
         phase_target_issues=tuple(draws.iloc[:12]["issue"].astype(str)),
     )
     statuses = {
-        (spec.experiment_id, 77): ExperimentPartitionStatusV3(
+        (spec.experiment_id, 77): ExperimentPartitionStatusV4(
             phase="development",
             experiment_id=spec.experiment_id,
             experiment_version=spec.experiment_version,
@@ -145,7 +153,8 @@ def _preflight_inputs(tmp_path: Path):
             cohort_definition_sha256=cohort.cohort_definition_sha256,
             expected_targets_sha256=cohort.payload.expected_targets_sha256,
             seed=77,
-            partition_path=tmp_path / spec.experiment_id / "observations.parquet",
+            current_path=tmp_path / spec.experiment_id / "CURRENT",
+            current_generation_id=None,
             completed_target_issues=(),
             pending_target_issues=("20005", "20006"),
             is_complete=False,
@@ -207,12 +216,8 @@ def test_legacy_cohort_inference_is_marked_informal() -> None:
     assert not bool(annotated.iloc[0]["formal_inference_eligible"])
 
 
-def test_preflight_has_24_checks_and_does_not_generate(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_preflight_v2_checks_do_not_generate(tmp_path: Path) -> None:
     inputs = _preflight_inputs(tmp_path)
-    monkeypatch.setattr(preflight, "git_worktree_dirty", lambda _: False)
     plan = build_experiment_preflight(
         project_root=tmp_path,
         history_path=inputs[1],
@@ -223,43 +228,19 @@ def test_preflight_has_24_checks_and_does_not_generate(
         cohort=inputs[5],
         statuses=inputs[6],
         task_chunk_plan=({"task_id": "one"},),
-        result_output_paths=(tmp_path / "schema_v3",),
+        result_output_paths=(tmp_path / "schema_v4",),
         inference_context="formal",
         allow_dirty=False,
+        git_status_entries=(),
+        results_root=tmp_path / "schema_v4",
     )
-    assert len(plan.checks) == 24
+    assert len(plan.checks) >= 30
+    assert plan.schema_version == "experiment-preflight-v2"
     assert plan.ready
 
 
-def test_formal_preflight_rejects_dirty_worktree(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_formal_preflight_rejects_dirty_worktree(tmp_path: Path) -> None:
     inputs = _preflight_inputs(tmp_path)
-    monkeypatch.setattr(preflight, "git_worktree_dirty", lambda _: True)
-    with pytest.raises(ValueError, match="dirty"):
-        build_experiment_preflight(
-            project_root=tmp_path,
-            history_path=inputs[1],
-            draws=inputs[0],
-            specifications=inputs[2],
-            run_context=inputs[3],
-            identities=inputs[4],
-            cohort=inputs[5],
-            statuses=inputs[6],
-            task_chunk_plan=(),
-            result_output_paths=(tmp_path / "schema_v3",),
-            inference_context="formal",
-            allow_dirty=False,
-        )
-
-
-def test_smoke_preflight_allows_explicit_dirty_override(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    inputs = _preflight_inputs(tmp_path)
-    monkeypatch.setattr(preflight, "git_worktree_dirty", lambda _: True)
     plan = build_experiment_preflight(
         project_root=tmp_path,
         history_path=inputs[1],
@@ -270,19 +251,56 @@ def test_smoke_preflight_allows_explicit_dirty_override(
         cohort=inputs[5],
         statuses=inputs[6],
         task_chunk_plan=(),
-        result_output_paths=(tmp_path / "schema_v3",),
+        result_output_paths=(tmp_path / "schema_v4",),
+        inference_context="formal",
+        allow_dirty=False,
+        git_status_entries=(
+            GitStatusEntry(path="src/changed.py", index_status=" ", worktree_status="M"),
+        ),
+        results_root=tmp_path / "schema_v4",
+    )
+    assert not plan.ready
+    assert plan.execution_will_be_blocked
+    assert plan.estimated_task_count == 0
+    assert plan.blocking_dirty_paths == ("src/changed.py",)
+
+
+def test_smoke_preflight_allows_explicit_dirty_override(tmp_path: Path) -> None:
+    inputs = _preflight_inputs(tmp_path)
+    generated = tmp_path / "outputs/formal_runs/run/log.txt"
+    plan = build_experiment_preflight(
+        project_root=tmp_path,
+        history_path=inputs[1],
+        draws=inputs[0],
+        specifications=inputs[2],
+        run_context=inputs[3],
+        identities=inputs[4],
+        cohort=inputs[5],
+        statuses=inputs[6],
+        task_chunk_plan=(),
+        result_output_paths=(tmp_path / "schema_v4",),
         inference_context="smoke",
         allow_dirty=True,
+        authorized_generated_paths=(
+            AuthorizedGeneratedPath(
+                path=tmp_path / "outputs/formal_runs/run",
+                kind="directory",
+            ),
+        ),
+        git_status_entries=(
+            GitStatusEntry(
+                path=generated.relative_to(tmp_path).as_posix(),
+                index_status="?",
+                worktree_status="?",
+            ),
+        ),
+        results_root=tmp_path / "schema_v4",
     )
     assert plan.ready and plan.git_dirty
 
 
-def test_preflight_outputs_use_exact_identity_directories(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_preflight_outputs_use_exact_identity_directories(tmp_path: Path) -> None:
     inputs = _preflight_inputs(tmp_path)
-    monkeypatch.setattr(preflight, "git_worktree_dirty", lambda _: False)
     plan = build_experiment_preflight(
         project_root=tmp_path,
         history_path=inputs[1],
@@ -293,13 +311,158 @@ def test_preflight_outputs_use_exact_identity_directories(
         cohort=inputs[5],
         statuses=inputs[6],
         task_chunk_plan=(),
-        result_output_paths=(tmp_path / "schema_v3",),
+        result_output_paths=(tmp_path / "schema_v4",),
         inference_context="formal",
         allow_dirty=False,
+        git_status_entries=(),
+        results_root=tmp_path / "schema_v4",
     )
     json_path, markdown_path = write_experiment_preflight(plan, tmp_path / "plans")
     assert plan.run_context_sha256 in json_path.parts
     assert plan.cohort_definition_sha256 in markdown_path.parts
+
+
+def test_preflight_truthfully_reports_generation_and_identity_conflicts(
+    tmp_path: Path,
+) -> None:
+    inputs = _preflight_inputs(tmp_path)
+    audit = PartitionGenerationAudit(
+        partition_directory=tmp_path / "schema_v4/partition",
+        current_generation_id="broken",
+        valid_generation_ids=("valid-orphan",),
+        orphan_generation_ids=("valid-orphan",),
+        invalid_generation_ids=("broken",),
+        current_is_valid=False,
+        recovery_possible=True,
+        warnings=("CURRENT invalid",),
+    )
+    plan = build_experiment_preflight(
+        project_root=tmp_path,
+        history_path=inputs[1],
+        draws=inputs[0],
+        specifications=inputs[2],
+        run_context=inputs[3],
+        identities=inputs[4],
+        cohort=inputs[5],
+        statuses=inputs[6],
+        task_chunk_plan=(),
+        result_output_paths=(tmp_path / "schema_v4",),
+        inference_context="formal",
+        allow_dirty=False,
+        git_status_entries=(),
+        generation_audits={"B1:seed_77": audit},
+        results_root=tmp_path / "schema_v4",
+        identity_conflicts=("expected target hash conflict",),
+    )
+    assert not plan.ready
+    assert plan.orphan_generation_count == 1
+    assert plan.invalid_generation_count == 1
+    assert "expected target hash conflict" in plan.identity_conflicts
+    assert plan.current_generation_by_partition == {"B1:seed_77": "broken"}
+
+
+def test_normal_execution_stops_before_task_construction_when_preflight_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    draws = _history()
+    generation_called = False
+    task_construction_called = False
+
+    class FakeStore:
+        def __init__(self, _: Path) -> None:
+            pass
+
+        def current_path(self, spec, identity, cohort, *, seed: int) -> Path:
+            return tmp_path / "schema_v4" / spec.experiment_id / f"seed_{seed}" / "CURRENT"
+
+        def audit_partition_generations(self, spec, identity, cohort, *, seed: int):
+            return PartitionGenerationAudit(
+                partition_directory=tmp_path / "schema_v4" / spec.experiment_id,
+                current_generation_id=None,
+                valid_generation_ids=(),
+                orphan_generation_ids=(),
+                invalid_generation_ids=(),
+                current_is_valid=True,
+                recovery_possible=False,
+                warnings=(),
+            )
+
+        def status(
+            self,
+            spec,
+            identity,
+            run_context,
+            cohort,
+            *,
+            seed: int,
+            expected_target_issues,
+        ) -> ExperimentPartitionStatusV4:
+            targets = tuple(expected_target_issues)
+            return ExperimentPartitionStatusV4(
+                phase=spec.data_split.phase,
+                experiment_id=spec.experiment_id,
+                experiment_version=spec.experiment_version,
+                run_context_sha256=identity.run_context_sha256,
+                execution_config_sha256=identity.execution_config_sha256,
+                cohort_definition_sha256=cohort.cohort_definition_sha256,
+                expected_targets_sha256=cohort.payload.expected_targets_sha256,
+                seed=seed,
+                current_path=self.current_path(spec, identity, cohort, seed=seed),
+                current_generation_id=None,
+                completed_target_issues=(),
+                pending_target_issues=targets,
+                is_complete=False,
+            )
+
+        def append(self, _: pd.DataFrame) -> None:
+            nonlocal generation_called
+            generation_called = True
+
+    def forbidden_task_construction(*args, **kwargs):
+        nonlocal task_construction_called
+        task_construction_called = True
+        pytest.fail("preflight failure constructed scheduler tasks")
+
+    marker = tmp_path / "preflight-written.txt"
+    monkeypatch.setattr(command, "ExperimentResultStoreV4", FakeStore)
+    monkeypatch.setattr(command, "load_verified_history", lambda _: draws)
+    monkeypatch.setattr(
+        command,
+        "build_experiment_preflight",
+        lambda **_: SimpleNamespace(ready=False),
+    )
+    monkeypatch.setattr(
+        command,
+        "write_experiment_preflight",
+        lambda *_: marker.write_text("blocked", encoding="utf-8"),
+    )
+    monkeypatch.setattr(command, "build_process_tasks", forbidden_task_construction)
+    monkeypatch.setattr(
+        command,
+        "FormalRunLock",
+        lambda *_args, **_kwargs: pytest.fail("preflight failure acquired run lock"),
+    )
+    results_root = tmp_path / "schema_v4"
+    with pytest.raises(RuntimeError, match="execution was not started"):
+        command.main(
+            [
+                "--experiment-ids",
+                "B1",
+                "--target-issues",
+                "20005",
+                "--minimum-history",
+                "3",
+                "--results-root",
+                str(results_root),
+                "--preflight-root",
+                str(tmp_path / "plans"),
+            ]
+        )
+    assert marker.exists()
+    assert not generation_called
+    assert not task_construction_called
+    assert not results_root.exists()
 
 
 def test_report_only_does_not_invoke_generation(
@@ -315,11 +478,16 @@ def test_report_only_does_not_invoke_generation(
         def load_cohort(self, **_: object) -> pd.DataFrame:
             return rows
 
-    monkeypatch.setattr(command, "ExperimentResultStoreV3", FakeStore)
+    monkeypatch.setattr(command, "ExperimentResultStoreV4", FakeStore)
     monkeypatch.setattr(
         command,
         "execute_experiment_process_task",
         lambda _: pytest.fail("report-only invoked generation"),
+    )
+    monkeypatch.setattr(
+        command,
+        "FormalRunLock",
+        lambda *_args, **_kwargs: pytest.fail("report-only acquired run lock"),
     )
     result = command.main(
         [

@@ -32,6 +32,7 @@ EXPERIMENT_PRIMARY_KEY: tuple[str, ...] = (
 
 STORAGE_SCHEMA_VERSION_V2 = "experiment-storage-schema-v2"
 STORAGE_SCHEMA_VERSION = "experiment-storage-schema-v3"
+STORAGE_SCHEMA_VERSION_V4 = "experiment-storage-schema-v4"
 EXPERIMENT_PRIMARY_KEY_V2: tuple[str, ...] = (
     "experiment_id",
     "experiment_version",
