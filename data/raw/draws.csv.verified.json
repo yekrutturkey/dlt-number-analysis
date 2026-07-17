@@ -1,0 +1,21 @@
+{
+  "schema_version": "verified-history-v1",
+  "created_at": "2026-07-14T08:42:01.197044Z",
+  "source_names": [
+    "500_com",
+    "china_sports_lottery_official"
+  ],
+  "source_urls": [
+    "https://datachart.500.com/dlt/history/newinc/history.php?start=07001&end=26078",
+    "https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry"
+  ],
+  "snapshot_content_hashes": [
+    "ba3b436d4942e3e2dd3e4968085b3903011bc0da521acb6e03b782e380f0bd1b",
+    "ac088731096ad7fc23a857a3d205ac86e5fb328f41dc429c3ee62daf5e7ba303"
+  ],
+  "record_count": 2896,
+  "history_start_issue": "07001",
+  "history_cutoff_issue": "26078",
+  "canonical_history_sha256": "4481e6d5354bf277adf0186d184a357f64f266e9846fc0d2f81711d0f36f1128",
+  "conflict_count": 0
+}

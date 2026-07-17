@@ -293,6 +293,74 @@ def compute_ticket_structure(
     )
 
 
+def compute_ticket_structures_batch(
+    front_numbers: np.ndarray,
+    back_numbers: np.ndarray,
+    *,
+    previous_draw: DrawRecord | None,
+) -> tuple[TicketStructureFeatures, ...]:
+    """Compute candidate features with NumPy while retaining identical audit models."""
+    fronts = np.asarray(front_numbers, dtype=np.int64)
+    backs = np.asarray(back_numbers, dtype=np.int64)
+    if fronts.ndim != 2 or fronts.shape[1] != 5:
+        raise ValueError("front batch must have shape (candidate_count, 5)")
+    if backs.ndim != 2 or backs.shape != (fronts.shape[0], 2):
+        raise ValueError("back batch must have shape (candidate_count, 2)")
+    if np.any(fronts < 1) or np.any(fronts > 35) or np.any(np.diff(fronts, axis=1) <= 0):
+        raise ValueError("front batch rows must be legal strictly ascending tickets")
+    if np.any(backs < 1) or np.any(backs > 12) or np.any(np.diff(backs, axis=1) <= 0):
+        raise ValueError("back batch rows must be legal strictly ascending tickets")
+
+    front_sum = fronts.sum(axis=1)
+    front_span = fronts[:, -1] - fronts[:, 0]
+    front_odd = (fronts % 2 == 1).sum(axis=1)
+    front_large = (fronts >= 18).sum(axis=1)
+    zone_1 = (fronts <= 12).sum(axis=1)
+    zone_2 = ((fronts >= 13) & (fronts <= 24)).sum(axis=1)
+    zone_3 = 5 - zone_1 - zone_2
+    front_consecutive = (np.diff(fronts, axis=1) == 1).sum(axis=1)
+    tails = fronts % 10
+    same_tail = np.zeros(fronts.shape[0], dtype=np.int64)
+    for left in range(4):
+        for right in range(left + 1, 5):
+            same_tail += tails[:, left] == tails[:, right]
+    if previous_draw is None:
+        front_repeat = np.zeros(fronts.shape[0], dtype=np.int64)
+        back_repeat = np.zeros(fronts.shape[0], dtype=np.int64)
+    else:
+        front_repeat = np.isin(fronts, previous_draw.front_numbers).sum(axis=1)
+        back_repeat = np.isin(backs, previous_draw.back_numbers).sum(axis=1)
+    back_sum = backs.sum(axis=1)
+    back_odd = (backs % 2 == 1).sum(axis=1)
+    back_large = (backs >= 7).sum(axis=1)
+    back_consecutive = (backs[:, 1] - backs[:, 0] == 1).astype(np.int64)
+
+    return tuple(
+        TicketStructureFeatures(
+            front_sum=int(front_sum[index]),
+            front_span=int(front_span[index]),
+            front_odd_count=int(front_odd[index]),
+            front_even_count=5 - int(front_odd[index]),
+            front_large_count=int(front_large[index]),
+            front_small_count=5 - int(front_large[index]),
+            front_zone_1_count=int(zone_1[index]),
+            front_zone_2_count=int(zone_2[index]),
+            front_zone_3_count=int(zone_3[index]),
+            front_consecutive_pair_count=int(front_consecutive[index]),
+            front_same_tail_pair_count=int(same_tail[index]),
+            front_repeat_from_previous_count=int(front_repeat[index]),
+            back_sum=int(back_sum[index]),
+            back_odd_count=int(back_odd[index]),
+            back_even_count=2 - int(back_odd[index]),
+            back_large_count=int(back_large[index]),
+            back_small_count=2 - int(back_large[index]),
+            back_consecutive_pair_count=int(back_consecutive[index]),
+            back_repeat_from_previous_count=int(back_repeat[index]),
+        )
+        for index in range(fronts.shape[0])
+    )
+
+
 def _empirical_quantile_centrality(value: float, distribution: tuple[float, ...]) -> float:
     if not distribution:
         raise ValueError("empirical distribution cannot be empty")

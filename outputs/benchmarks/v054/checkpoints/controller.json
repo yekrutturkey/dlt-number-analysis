@@ -1,0 +1,41 @@
+{
+  "benchmark_config_sha256": "3895d14e022d6227a6925d62df2869a25173273b4543aa5e3e8fa3ed6e242857",
+  "benchmark_version": "v0.5.4-production-runner-v1",
+  "completed_target_issues": [
+    "08009",
+    "08010",
+    "08011",
+    "08012",
+    "08013",
+    "08014",
+    "08015",
+    "08016",
+    "08017",
+    "08018"
+  ],
+  "error": null,
+  "execution": {
+    "cpu_seconds": 35.140625,
+    "gc_collection_counts": [
+      4195,
+      381,
+      32
+    ],
+    "memory_error": null,
+    "memory_scope": "isolated_subprocess_peak",
+    "peak_memory_mb": 352.41015625,
+    "process_exit_status": 0,
+    "timed_out": false,
+    "wall_clock_seconds": 35.69312959999661
+  },
+  "finished_at": "2026-07-16T13:36:35.721511+00:00",
+  "history_sha256": "4481e6d5354bf277adf0186d184a357f64f266e9846fc0d2f81711d0f36f1128",
+  "hostname": "x7ny8",
+  "platform": "Windows-11-10.0.26100-SP0",
+  "process_count": 1,
+  "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。",
+  "schema_version": "v0.5.3",
+  "skipped_target_issues": [],
+  "started_at": "2026-07-16T13:36:00.056210+00:00",
+  "status": "completed"
+}

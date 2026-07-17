@@ -6,6 +6,7 @@ from collections import Counter
 from itertools import combinations
 from math import isfinite
 from random import Random
+from time import perf_counter
 
 from dlt_number_analysis.portfolio.models import (
     CandidatePool,
@@ -145,7 +146,7 @@ def _assign_roles(
     )
 
 
-def _score_portfolio(
+def score_portfolio_tickets(
     tickets: tuple[PortfolioTicket, ...],
     core_numbers: tuple[int, ...],
     support_numbers: tuple[int, ...],
@@ -259,6 +260,7 @@ def optimize_portfolio(
     repeat_penalty_weight: float = 0.20,
 ) -> PortfolioSelection:
     """Select five tickets under all v0.4 hard constraints."""
+    search_started = perf_counter()
     active_constraints = constraints or PortfolioConstraints()
     if len(pool.candidates) < 10_000:
         raise ValueError("portfolio optimization requires at least 10,000 candidates")
@@ -309,7 +311,7 @@ def optimize_portfolio(
         tickets = _assign_roles(selected_tuple, core_numbers, active_constraints)
         if tickets is None:
             continue
-        scores = _score_portfolio(
+        scores = score_portfolio_tickets(
             tickets,
             core_numbers,
             support_numbers,
@@ -356,6 +358,7 @@ def optimize_portfolio(
             "search_trials": search_trials,
             "stable_candidate_limit": stable_candidate_limit,
             "feasible_portfolios_evaluated": feasible_count,
+            "portfolio_search_seconds": perf_counter() - search_started,
             "candidate_pool_random_seed": pool.random_seed,
             "candidate_pool_size": len(pool.candidates),
             "single_ticket_weight": single_ticket_weight,

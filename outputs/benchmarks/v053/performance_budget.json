@@ -1,0 +1,71 @@
+{
+  "cumulative_performance_seconds": 43.45309769999585,
+  "performance_budget_seconds": 480.0,
+  "schema_version": "v0.5.3",
+  "stage_runs": [
+    {
+      "checkpoint_path": "E:\\dlt-number-analysis\\outputs\\benchmarks\\v053\\prepare_08009.json",
+      "elapsed_seconds": 5.529091700002027,
+      "process_exit_status": 0,
+      "reused_checkpoint": false,
+      "stage": "prepare",
+      "status": "completed"
+    },
+    {
+      "checkpoint_path": "E:\\dlt-number-analysis\\outputs\\benchmarks\\v053\\vectorized_full_08009.json",
+      "elapsed_seconds": 4.001931500002684,
+      "process_exit_status": 0,
+      "reused_checkpoint": false,
+      "stage": "vectorized_full",
+      "status": "completed"
+    },
+    {
+      "checkpoint_path": "E:\\dlt-number-analysis\\outputs\\benchmarks\\v053\\object_b2_bank_50_08009.json",
+      "elapsed_seconds": 4.8166112000035355,
+      "process_exit_status": 0,
+      "reused_checkpoint": false,
+      "stage": "object_50",
+      "status": "completed"
+    },
+    {
+      "checkpoint_path": "E:\\dlt-number-analysis\\outputs\\benchmarks\\v053\\object_b2_bank_100_08009.json",
+      "elapsed_seconds": 7.530761599999096,
+      "process_exit_status": 0,
+      "reused_checkpoint": false,
+      "stage": "object_100",
+      "status": "completed"
+    },
+    {
+      "checkpoint_path": "E:\\dlt-number-analysis\\outputs\\benchmarks\\v053\\object_b2_bank_250_08009.json",
+      "elapsed_seconds": 11.108501999995497,
+      "process_exit_status": 0,
+      "reused_checkpoint": false,
+      "stage": "object_250",
+      "status": "completed"
+    },
+    {
+      "checkpoint_path": "E:\\dlt-number-analysis\\outputs\\benchmarks\\v053\\evaluation_raw_08009.json",
+      "elapsed_seconds": 3.183033699999214,
+      "process_exit_status": 0,
+      "reused_checkpoint": false,
+      "stage": "evaluation_raw",
+      "status": "completed"
+    },
+    {
+      "checkpoint_path": "E:\\dlt-number-analysis\\outputs\\benchmarks\\v053\\evaluation_full_08009.json",
+      "elapsed_seconds": 3.578422899998259,
+      "process_exit_status": 0,
+      "reused_checkpoint": false,
+      "stage": "evaluation_full",
+      "status": "completed"
+    },
+    {
+      "checkpoint_path": "E:\\dlt-number-analysis\\outputs\\benchmarks\\v053\\evaluation_reduced_08009.json",
+      "elapsed_seconds": 3.7047430999955395,
+      "process_exit_status": 0,
+      "reused_checkpoint": false,
+      "stage": "evaluation_reduced",
+      "status": "completed"
+    }
+  ]
+}

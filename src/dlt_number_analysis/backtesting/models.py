@@ -58,13 +58,39 @@ class BacktestPeriodResult(BaseModel):
     roi: Decimal | None
     prize_rule_version: str | None
     prize_data_available: bool
-    random_baseline_seed_count: int = Field(ge=1000)
+    random_baseline_seed_count: int = Field(ge=1)
     random_metric_percentiles: dict[str, float]
 
     @property
     def hit_concentration_ratio(self) -> float:
         """Deprecated v0.3 read accessor; migrate to ``ticket_hit_share``."""
         return self.ticket_hit_share
+
+
+class RawObservationResult(BaseModel):
+    """Direct prediction evaluation without Monte Carlo or bootstrap fields."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    target_issue: str = Field(pattern=r"^\d+$")
+    data_cutoff_issue: str = Field(pattern=r"^\d+$")
+    strategy_name: str = Field(min_length=1)
+    random_seed: int
+    best_front_hits: int = Field(ge=0, le=5)
+    best_back_hits: int = Field(ge=0, le=2)
+    best_total_hits: int = Field(ge=0, le=7)
+    at_least_three_front: bool
+    at_least_2_plus_1: bool
+    ticket_hit_share: float = Field(ge=0, le=1)
+    unique_hit_concentration: float = Field(ge=0, le=1)
+    front_pool_coverage: int = Field(ge=0, le=5)
+    back_pool_coverage: int = Field(ge=0, le=2)
+    total_cost: Decimal = Field(gt=0)
+    total_prize: Decimal | None = Field(ge=0)
+    roi: Decimal | None
+    any_prize: bool | None
+    prize_rule_version: str | None
+    prize_data_available: bool
 
 
 class RandomBaselineSummary(BaseModel):
@@ -76,7 +102,7 @@ class RandomBaselineSummary(BaseModel):
     cache_key: str = Field(min_length=1)
     cache_reused: bool
     seed_start: int
-    seed_count: int = Field(ge=1000)
+    seed_count: int = Field(ge=1)
     metric_summaries: dict[str, RandomMetricSummary]
 
 

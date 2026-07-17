@@ -1,0 +1,8 @@
+{
+  "source_name": "china_sports_lottery_official",
+  "source_url": "https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry",
+  "fetched_at": "2026-07-14T08:37:39.892273Z",
+  "source_format": "sporttery_json_pages",
+  "content_hash": "ac088731096ad7fc23a857a3d205ac86e5fb328f41dc429c3ee62daf5e7ba303",
+  "raw_file": "20260714T083739892273Z_ac088731096ad7fc23a857a3d205ac86e5fb328f41dc429c3ee62daf5e7ba303.pages.json"
+}

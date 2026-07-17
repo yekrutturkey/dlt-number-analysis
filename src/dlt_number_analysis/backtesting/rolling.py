@@ -23,6 +23,7 @@ from dlt_number_analysis.backtesting.models import (
     ConfidenceInterval,
     RandomBaselineSummary,
     RandomMetricSummary,
+    RawObservationResult,
 )
 from dlt_number_analysis.data import (
     CSV_COLUMNS,
@@ -120,6 +121,81 @@ def _hit_metrics(prediction: PredictionRecord, actual_draw: DrawRecord) -> _HitM
         [(set(ticket.front_numbers), set(ticket.back_numbers)) for ticket in prediction.tickets],
         set(actual_draw.front_numbers),
         set(actual_draw.back_numbers),
+    )
+
+
+def calculate_raw_hit_metrics(
+    prediction: PredictionRecord,
+    actual_draw: DrawRecord,
+) -> dict[str, int | bool | float]:
+    """Return hit-only metrics without Monte Carlo or historical bootstrap work."""
+    hits = _hit_metrics(prediction, actual_draw)
+    return {
+        "best_front_hits": hits.best_front_hits,
+        "best_back_hits": hits.best_back_hits,
+        "best_total_hits": hits.best_total_hits,
+        "at_least_three_front": hits.at_least_three_front,
+        "at_least_2_plus_1": hits.at_least_2_plus_1,
+        "ticket_hit_share": hits.ticket_hit_share,
+        "unique_hit_concentration": hits.unique_hit_concentration,
+        "front_pool_coverage": hits.front_pool_coverage,
+        "back_pool_coverage": hits.back_pool_coverage,
+    }
+
+
+def evaluate_prediction_raw_observation(
+    prediction: PredictionRecord,
+    actual_draw: DrawRecord,
+    prize_table: PrizeTable | None = None,
+    *,
+    prize_context_by_issue: Mapping[str, str] | None = None,
+    prize_tables: Sequence[PrizeTable] | None = None,
+    issue_prize_records: Mapping[str, IssuePrizeRecord] | None = None,
+    default_ticket_cost: Decimal = Decimal("2"),
+) -> RawObservationResult:
+    """Evaluate one saved prediction directly, with no resampling side effects."""
+    if prediction.target_issue != actual_draw.issue:
+        raise ValueError("prediction target issue differs from actual draw")
+    if int(prediction.data_cutoff_issue) >= int(actual_draw.issue):
+        raise ValueError("prediction cutoff must precede the actual draw")
+    if default_ticket_cost <= 0:
+        raise ValueError("default_ticket_cost must be positive")
+    hits = _hit_metrics(prediction, actual_draw)
+    (
+        any_prize,
+        total_cost,
+        total_prize,
+        roi,
+        prize_rule_version,
+        prize_data_available,
+    ) = _evaluate_monetary_result(
+        prediction,
+        actual_draw,
+        _build_schedule(prize_table, prize_tables),
+        prize_contexts=dict(prize_context_by_issue or {}),
+        issue_prize_records=dict(issue_prize_records or {}),
+        default_ticket_cost=default_ticket_cost,
+    )
+    return RawObservationResult(
+        target_issue=actual_draw.issue,
+        data_cutoff_issue=prediction.data_cutoff_issue,
+        strategy_name=prediction.strategy_name,
+        random_seed=prediction.random_seed,
+        best_front_hits=hits.best_front_hits,
+        best_back_hits=hits.best_back_hits,
+        best_total_hits=hits.best_total_hits,
+        at_least_three_front=hits.at_least_three_front,
+        at_least_2_plus_1=hits.at_least_2_plus_1,
+        ticket_hit_share=hits.ticket_hit_share,
+        unique_hit_concentration=hits.unique_hit_concentration,
+        front_pool_coverage=hits.front_pool_coverage,
+        back_pool_coverage=hits.back_pool_coverage,
+        total_cost=total_cost,
+        total_prize=total_prize,
+        roi=roi,
+        any_prize=any_prize,
+        prize_rule_version=prize_rule_version,
+        prize_data_available=prize_data_available,
     )
 
 
@@ -359,13 +435,18 @@ def run_rolling_backtest(
     default_ticket_cost: Decimal = Decimal("2"),
     data_quality_report: DataQualityReport | None = None,
     allow_short_history: bool = False,
+    allow_reduced_resampling: bool = False,
 ) -> BacktestReport:
     """Run strict expanding-window predictions; never expose the target draw to a strategy."""
     if min_history < 1:
         raise ValueError("min_history must be at least 1")
-    if random_baseline_seed_count < 1000:
+    if random_baseline_seed_count < 1:
+        raise ValueError("random baseline must use at least one seed")
+    if random_baseline_seed_count < 1000 and not allow_reduced_resampling:
         raise ValueError("random baseline must use at least 1000 seeds")
-    if bootstrap_resamples < 100:
+    if bootstrap_resamples < 1:
+        raise ValueError("bootstrap_resamples must be at least one")
+    if bootstrap_resamples < 100 and not allow_reduced_resampling:
         raise ValueError("bootstrap_resamples must be at least 100")
     if default_ticket_cost <= 0:
         raise ValueError("default_ticket_cost must be positive")

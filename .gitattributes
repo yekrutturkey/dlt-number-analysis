@@ -5,3 +5,5 @@
 *.md text eol=lf
 *.py text eol=lf
 *.toml text eol=lf
+data/snapshots/**/*.html binary
+data/snapshots/**/*.pages.json binary

@@ -1,0 +1,75 @@
+{
+  "bank_hash": "37dc162ada35fe13106592231904ddb0f29603ebb26bba5d9c9ab5e6173c1e91",
+  "candidate_numbers_hash": "957322ed34540f13da12334615c4b736c9ffce8e8b08902486f04611450489c9",
+  "data_cutoff_issue": "08008",
+  "error": null,
+  "evaluation_mode": "raw_observation",
+  "evaluation_seconds": 0.00010359999578213319,
+  "execution": {
+    "cpu_seconds": 1.734375,
+    "gc_collection_counts": [
+      322,
+      30,
+      3
+    ],
+    "memory_error": null,
+    "memory_scope": "isolated_subprocess_peak",
+    "peak_memory_mb": 589.578125,
+    "process_exit_status": 0,
+    "timed_out": false,
+    "wall_clock_seconds": 1.734565399994608
+  },
+  "metrics": {
+    "B2": {
+      "at_least_2_plus_1": false,
+      "at_least_three_front": false,
+      "best_back_hits": 1,
+      "best_front_hits": 1,
+      "best_total_hits": 2,
+      "ticket_hit_share": 0.4,
+      "unique_hit_concentration": 0.4
+    },
+    "B3": {
+      "at_least_2_plus_1": false,
+      "at_least_three_front": false,
+      "best_back_hits": 1,
+      "best_front_hits": 1,
+      "best_total_hits": 2,
+      "ticket_hit_share": 0.5,
+      "unique_hit_concentration": 1.0
+    },
+    "B4": {
+      "at_least_2_plus_1": false,
+      "at_least_three_front": false,
+      "best_back_hits": 1,
+      "best_front_hits": 1,
+      "best_total_hits": 2,
+      "ticket_hit_share": 0.4,
+      "unique_hit_concentration": 0.4
+    },
+    "B5": {
+      "at_least_2_plus_1": false,
+      "at_least_three_front": false,
+      "best_back_hits": 1,
+      "best_front_hits": 1,
+      "best_total_hits": 2,
+      "ticket_hit_share": 0.4,
+      "unique_hit_concentration": 0.4
+    },
+    "B6": {
+      "at_least_2_plus_1": false,
+      "at_least_three_front": false,
+      "best_back_hits": 1,
+      "best_front_hits": 2,
+      "best_total_hits": 2,
+      "ticket_hit_share": 0.3333333333333333,
+      "unique_hit_concentration": 0.5
+    }
+  },
+  "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。",
+  "schema_version": "v0.5.3",
+  "seed": 20260000,
+  "stage": "evaluation_raw",
+  "status": "completed",
+  "target_issue": "08009"
+}

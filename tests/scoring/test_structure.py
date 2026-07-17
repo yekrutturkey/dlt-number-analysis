@@ -11,6 +11,7 @@ from dlt_number_analysis import DISCLAIMER
 from dlt_number_analysis.data import CSV_COLUMNS, DrawRecord
 from dlt_number_analysis.scoring import (
     compute_ticket_structure,
+    compute_ticket_structures_batch,
     fit_structure_profile,
     score_ticket_structure,
 )
@@ -70,6 +71,28 @@ def test_ticket_structure_contains_all_requested_front_and_back_features() -> No
     assert features.back_sum == 19
     assert features.back_odd_count + features.back_even_count == 2
     assert features.back_large_count + features.back_small_count == 2
+
+
+def test_numpy_batch_features_exactly_match_scalar_features() -> None:
+    history = make_history()
+    previous = last_draw(history)
+    fronts = np.asarray(
+        [
+            [2, 13, 20, 25, 32],
+            [1, 2, 11, 21, 35],
+            [7, 12, 18, 24, 30],
+        ],
+        dtype=np.int64,
+    )
+    backs = np.asarray([[8, 11], [1, 2], [6, 7]], dtype=np.int64)
+
+    batch = compute_ticket_structures_batch(fronts, backs, previous_draw=previous)
+    scalar = tuple(
+        compute_ticket_structure(front, back, previous_draw=previous)
+        for front, back in zip(fronts, backs, strict=True)
+    )
+
+    assert batch == scalar
 
 
 def test_structure_score_saves_each_empirical_component() -> None:

@@ -46,7 +46,7 @@ PROFILE_DEFAULTS: dict[PipelineProfile, dict[str, int]] = {
         "candidate_count": 25_000,
         "optimizer_search_trials": 100_000,
         "stable_candidate_limit": 5_000,
-        "parallel_workers": 4,
+        "parallel_workers": 1,
     },
 }
 
@@ -89,13 +89,14 @@ class PipelineConfig(BaseModel):
     optimizer_search_trials: int = Field(ge=1)
     stable_candidate_limit: int = Field(ge=5)
     parallel_workers: int = Field(ge=1, le=64)
+    candidate_scoring_method: Literal["scalar", "numpy_batch_features"] = "numpy_batch_features"
     minimum_history_size: int = Field(default=100, ge=1)
     single_ticket_weight: float = Field(default=0.45, ge=0)
     diversity_weight: float = Field(default=0.25, ge=0)
     core_weight: float = Field(default=0.15, ge=0)
     structure_weight: float = Field(default=0.15, ge=0)
     repeat_penalty_weight: float = Field(default=0.20, ge=0)
-    model_version: str = "prediction-pipeline-v0.4.1"
+    model_version: str = "prediction-pipeline-v0.5"
 
     @model_validator(mode="before")
     @classmethod
@@ -149,6 +150,9 @@ class CandidatePoolSummary(BaseModel):
     minimum_combined_score: float = Field(ge=0, le=1)
     mean_combined_score: float = Field(ge=0, le=1)
     maximum_combined_score: float = Field(ge=0, le=1)
+    candidate_generation_seconds: float = Field(ge=0)
+    candidate_scoring_seconds: float = Field(ge=0)
+    candidate_scoring_method: Literal["scalar", "numpy_batch_features"]
     scorer_spec: ScorerSpec
     structure_profile_cutoff_issue: str = Field(pattern=r"^\d+$")
 
@@ -185,6 +189,11 @@ def _summarize_pool(
         minimum_combined_score=min(scores),
         mean_combined_score=fmean(scores),
         maximum_combined_score=max(scores),
+        candidate_generation_seconds=float(
+            pool.generation_parameters["candidate_generation_seconds"]
+        ),
+        candidate_scoring_seconds=float(pool.generation_parameters["candidate_scoring_seconds"]),
+        candidate_scoring_method=str(pool.generation_parameters["candidate_scoring_method"]),
         scorer_spec=pool.scorer_spec,
         structure_profile_cutoff_issue=profile.data_cutoff_issue,
     )
@@ -233,6 +242,7 @@ class PredictionPipeline:
             number_score_weight=self.config.number_score_weight,
             structure_score_weight=self.config.structure_score_weight,
             parallel_workers=self.config.parallel_workers,
+            candidate_scoring_method=self.config.candidate_scoring_method,
         )
         selection = optimize_portfolio(
             pool,

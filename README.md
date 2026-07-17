@@ -1,12 +1,359 @@
 # dlt-number-analysis
 
+## v0.5.7.2：任务完成即落盘与真实断点续跑
+
+正式 ProcessPool 调度现在通过父进程同步完成回调逐 task 提交。worker future 返回后，父进程
+先校验 `observations_json` 的 task、target、ExperimentSpec、seed、run context、execution config
+和完整 logical cohort 身份，再写 `formal-task-commit-v1` prepared 审计、调用 schema_v4
+`append`、回读各实验分区 CURRENT 并确认本 task 的目标已经进入 completed 集合，最后才把 task
+审计更新为 completed 并将它计入调度完成数。worker 子进程从不写 schema_v4，单写者仍是父进程。
+
+正式命令使用 `retain_full_results=false`：调度报告只保留 task ID、CPU 时间、结果哈希、观测数和
+committed 标记，不累计完整观测 JSON；schema_v4 Parquet 是正式观测来源。任务审计只记录执行
+过程，不是完成状态的最终事实来源。resume 每次都重新读取 CURRENT，为每个 ExperimentSpec
+独立计算 completed/pending；即使一个 B1–B6 task 只提交了部分实验，已提交实验也会跳过，只有
+仍缺失的实验与目标会重建 task。
+
+正式运行被 Ctrl+C 中断后，应在确认没有遗留活动进程后重复完全相同的命令。已切换 CURRENT 的
+targets 会自动跳过，最多损失仍在运行或尚未完成父进程提交的 task。`workers=1` 时理论最大未提交
+范围是一个 chunk；默认 `chunk_size=25` 时最多重算一个25期 chunk，而不是全部 development。
+强制终止遗留的 RUNNING.lock 仍必须使用已有的显式 stale-lock 审计流程。
+
+callback、store、task audit 或 worker 失败会保留已经成功切换的 CURRENT，不回滚早期提交。
+scheduler/runtime 记录 planned、worker completed、committed、failed、pending、首次/末次提交时间、
+提交耗时、中断状态和 resume 前已完成目标数。调度结束后还会重新读取全部 schema_v4 分区；只有
+所有实验 completed targets 完全等于 logical cohort、CURRENT 全部有效、身份一致且没有 failed 或
+pending task 时才生成正式策略比较报告。partial 状态只保存失败与运行时审计，不输出策略比较结论。
+
+评分不等于真实中奖概率，彩票开奖结果是随机事件。
+
+## v0.5.7.1：rename/copy 双端点审计与人工恢复事务
+
+Git `status --porcelain=v1 -z` 的 rename/copy 记录按 Git 实际顺序解析：第一条路径是
+目标路径，紧随其后的第二条路径是原始路径。审计同时检查 source 和 destination；任一
+端点位于受保护的源代码、配置或冻结数据范围，或者任一生成文件端点未被本次 CLI
+明确授权，正式执行都会被阻断。审计报告以 `source -> destination` 保留两个端点，
+不会把移动到授权输出目录当作来源路径已经安全。
+
+stale `RUNNING.lock` 清理和 schema_v4 `CURRENT` repair 现在都先持久化
+`status=prepared` 的独立审计，再改变锁或指针，成功后原子更新为
+`status=completed`；操作失败尽量更新为 `status=failed`。如果状态已经改变而最终审计
+更新中断，prepared 文件仍保留。可使用以下只读模式检查 prepared、completed、failed
+和不一致操作；它不会获取运行锁、修改 CURRENT、删除锁或生成候选：
+
+```powershell
+uv run python scripts/run_v05_experiments.py --audit-manual-operations `
+  --target-issues <issue> --experiment-ids B1
+```
+
+清理 stale lock 前必须先确认原进程已经退出，再显式提供原因。首次 append 如果在完整
+generation rename 后、CURRENT 创建前中断，会留下 valid orphan 且没有 CURRENT：正式
+读取不会自动选择它，普通 resume 的 preflight 会因无效/缺失 CURRENT 阻断。恢复顺序为：
+
+```powershell
+uv run python scripts/run_v05_experiments.py --audit-generations `
+  --target-issues <issue> --experiment-ids B1
+
+uv run python scripts/run_v05_experiments.py --repair-current `
+  --repair-generation-id <validated-generation-id> `
+  --repair-reason "人工核验后的恢复原因" `
+  --target-issues <issue> --experiment-ids B1
+```
+
+不得手工创建或编辑 `CURRENT`，不得因为存在 orphan 就按 mtime 或名称选择“最新”
+generation。若 `--audit-manual-operations` 报告 prepared 但未 completed，应人工核对锁是否
+仍存在、CURRENT 是否已经指向 proposed generation，并保留审计后再决定下一步；工具不会
+自动修复这些状态。
+
+## v0.5.7：generation 事务、强制 preflight 与中断恢复
+
+正式结果默认写入 `outputs/experiments/schema_v4/`。逻辑分区仍包含 phase、实验版本、
+run context、execution config、cohort 和 seed；分区内部改为不可变 generation：
+
+```text
+seed_<seed>/
+  CURRENT
+  generations/<generation_id>/
+    observations.parquet
+    manifest.json
+```
+
+每次 append 都写一个完整的新 generation，校验 Parquet SHA、manifest SHA、身份、主键和
+completed target 集后，才用 `os.replace` 原子切换 JSON `CURRENT`。`CURRENT` 保存
+`storage_schema_version`、`generation_id`、`manifest_sha256`、`updated_at`；manifest 在
+schema_v3 字段之外保存 generation/parent ID、generation 创建时间、观测数和
+`committed=true`。旧 generation 不在原地修改，也不在 append 中删除。
+
+未被 `CURRENT` 引用的 generation 是 orphan：正式读取不会选择它，也不会按 mtime
+猜测版本。使用 `--audit-generations` 只读查看；需要恢复时，必须用
+`--repair-current --repair-generation-id <id> --repair-reason <原因>` 显式选择一个已完整
+验证的 generation。修复会留下独立审计记录。不得手工修改 Parquet、manifest 或
+`CURRENT`。
+
+普通执行与 smoke 都先写 preflight v2，并在 `ready=false` 时、调度任务构造之前停止。
+Git 检查允许本次 CLI 精确声明的结果、preflight、scheduler、runtime、报告和日志路径
+存在，以便中断后 resume；`src/`、`tests/`、`scripts/`、`config/`、`data/raw/`、
+`.github/`、`.gitignore`、`pyproject.toml` 或 `uv.lock` 的变化始终阻断正式执行。
+`--allow-dirty` 只放宽 smoke 的非源代码变化，不能绕过冻结数据和配置检查。
+
+正式 development 的操作顺序是：先在干净提交上运行 `--preflight-only`，审阅精确的
+run/cohort 哈希与输出路径，再用完全相同参数普通执行。中断后重复同一命令；已由
+`CURRENT` 提交的 target 会跳过，orphan 不会被自动采用。如存在 orphan 或损坏指针，
+先执行只读 audit，再决定是否显式 repair。普通写入使用身份范围内的 `RUNNING.lock`
+防止第二个写进程；异常留下的锁只能通过
+`--clear-stale-run-lock --stale-lock-reason <原因>` 显式清理并生成审计。
+
+报告、scheduler、runtime 和日志的默认位置在身份计算后解析为
+`outputs/formal_runs/<run-hash>/<cohort-hash>/...`。V2、V3、legacy、v0.5.5 和 v0.5.6
+审计产物保持只读兼容，不会被 V4 扫描、迁移或重写。
+
+## v0.5.6：逻辑 cohort、schema_v3 与正式 preflight
+
+v0.5.6 将完整科学目标集合与调度 task chunk 分离。控制器在分块之前创建
+`CohortDefinitionIdentity`；`cohort_definition_sha256` 由身份版本、用途、阶段、cohort ID、
+规范化完整期号列表及其计数和边界计算，不包含 chunk 大小、worker 数、任务顺序或续跑的
+pending 集合。worker 只计算自己的 chunk，但所有输出行保留同一完整逻辑 cohort 身份。
+
+新的正式结果默认写入：
+
+`outputs/experiments/schema_v3/{phase}/{experiment_id}/{experiment_version}/<run-hash>/<execution-hash>/<cohort-hash>/seed_<seed>/`
+
+schema_v3 主键为
+`experiment_id + experiment_version + execution_config_sha256 + cohort_definition_sha256 + phase + seed + target_issue`。
+schema_v2 和 legacy 结果继续只读兼容，不自动迁移、重写或参与 schema_v3 正式报告。
+
+正式长任务应先运行只读 preflight；正式模式拒绝脏工作区，只有 smoke 加
+`--allow-dirty` 才能显式覆盖：
+
+```powershell
+uv run python scripts/run_v05_experiments.py --experiment-ids B1 B2 B3 B4 B5 B6 --preflight-only
+```
+
+report-only 必须精确指定一个 run context 和一个逻辑 cohort，不会扫描合并全部结果：
+
+```powershell
+uv run python scripts/run_v05_experiments.py --experiment-ids B1 B2 B3 B4 B5 B6 `
+  --report-only `
+  --run-context-sha256 <64位SHA256> `
+  --cohort-definition-sha256 <64位SHA256>
+```
+
+v0.5.6 仅允许的验证入口分为一次实际 6 期双分块 smoke、一次只读续跑检查和一次精确
+report-only；后两步不调用候选或银行生成：
+
+```powershell
+uv run python scripts/run_v056_cohort_smoke.py
+uv run python scripts/run_v056_cohort_smoke.py --resume-check-only --chunk-size 2
+uv run python scripts/run_v056_cohort_smoke.py --report-only `
+  --run-context-sha256 <64位SHA256> `
+  --cohort-definition-sha256 <64位SHA256>
+```
+
+## v0.5.5: formal experiment identity and schema_v2 isolation
+
+Formal observations now use two audit identities. `run_context_sha256` binds the frozen
+canonical history, concrete chronological split boundaries, phase, evaluation semantics,
+expanded profile, requested Portfolio scoring path, bank limits, scoring implementation and
+prize-data hashes. It deliberately excludes experiment specifications, target chunks, worker
+count, host, wall-clock data and Git SHA. Each ExperimentSpec then receives
+`execution_config_sha256 = sha256(run_context_sha256 + experiment_config_sha256)`.
+
+New results are stored below
+`outputs/experiments/schema_v2/{phase}/{experiment_id}/{experiment_version}/<run-hash>/<execution-hash>/seed_<seed>/`.
+Every partition contains an atomically written Parquet file and a matching manifest. Resume
+status requires the full ExperimentSpec, execution identity and run context; old v0.5.1 flat
+partitions cannot complete a v0.5.5 task. The CLI never migrates legacy CSV implicitly.
+`--migrate-legacy-observations` imports it only into `outputs/experiments/legacy_import` as
+`legacy_unverified` and excludes it from formal statistics.
+
+The bounded correctness entry point runs only the dynamically selected first eligible, median
+and last development targets with B1-B6, seed 20260000, fast/raw/NumPy and one process:
+
+```powershell
+uv run python scripts/run_v055_identity_smoke.py
+uv run python scripts/run_v055_identity_smoke.py --resume-check-only
+```
+
+This smoke validates identity, storage and read-only resume behavior only. It is not used for
+parameter selection or a strategy-advantage claim. 评分不等于真实中奖概率，彩票开奖结果是随机事件。
+
+## v0.5.4：正式批量 Runner 的 raw observation 模式
+
+共享 B1–B6 Runner 现在显式支持 `raw_observation` 与 `full_resampling`。前者只对已经生成的
+`PredictionRecord` 计算直接命中及当期可用奖金，完全跳过随机 Monte Carlo、百分位、Bootstrap、
+策略汇总和单期 `run_rolling_backtest`；后者保持原有完整统计语义和 1000/1000 默认重采样。批量开发
+实验推荐 raw 模式，final holdout 强制 full 模式。两种模式均写入 `evaluation_mode` 审计字段。
+
+受限性能入口为：
+
+```powershell
+uv run python scripts/run_v054_batch_runner_benchmark.py
+uv run python scripts/run_v054_batch_runner_benchmark.py --resume-check-only
+```
+
+该入口硬限制为 08009–08018、B1–B6、seed 20260000、fast、NumPy 向量化、raw、单进程，
+并将结果与正式实验分区隔离在 `outputs/benchmarks/v054/`。第二条命令只校验并汇总 checkpoint，
+不会重新生成候选号码或 Portfolio 银行。
+
+26079 期的用户提供信息尚未经过两个独立官方/公开来源交叉核验，本版本不将其追加到冻结的 v0.5
+历史快照；它只能在新的、完成来源核验的历史快照版本中加入。
+
 中国体育彩票超级大乐透（以下简称“大乐透”）历史开奖数据校验、统计特征、策略比较与严格时间序列滚动回测项目。
 
 > **重要声明：评分不等于真实中奖概率，彩票开奖结果是随机事件。**
 
 本项目只用于数据工程、统计分析与回测研究，不承诺、暗示或声称能够预测中奖号码。
 
-## v0.4.1 当前范围
+## v0.5.2：Portfolio 向量化评分与 cohort 报告
+
+v0.5.2 保留 v0.5.1 的候选池、可行银行、随机种子和硬约束语义，只替换 B2–B6 和消融配置的
+评分执行方式：
+
+- `CandidateArrayBundle` 将一个 `CandidatePool` 按原顺序转换一次，使用只读整数/浮点 NumPy
+  数组保存前后区号码、号码分、结构分、组合分及结构分类代码；票据号码身份映射不依赖
+  `candidate_id`。
+- `FeasiblePortfolioIndexBank` 为每个银行成员只保存 5 个候选索引，并预计算与评分配置无关的
+  diversity、core concentration、structure coverage 和 repeat penalty。
+- `CandidateScoreView` 只绑定号码分、结构分和组合分数组，不再为 B2–B6 或每个消融参数组合
+  重新构造 10,000 个 `CandidateTicketScore`。
+- `score_portfolio_bank_vectorized` 一次性计算全部银行成员，只为最终 entry 构造 5 张
+  `PortfolioTicket`、一个 `PortfolioScoreBreakdown` 和一个 `PortfolioSelection`。
+- 正式共享实验默认 `portfolio_scoring_method=numpy_vectorized`；
+  `object_reference` 继续作为语义参考实现。B1 仍从银行按种子随机抽取，不受向量评分影响。
+- 对象路径与数组路径的 B2–B6 测试在 entry hash、5注号码、core/support 和全部子评分上完全一致；
+  candidate ID/顺序扰动及完全同分 tie-break 也保持确定性。
+
+`experiment_summary.md` 现在按精确 target cohort 分组，分别展示完整 development、v0.5.1
+100期 paired smoke、单期 correctness smoke、calibration 和 final holdout。配对检验只在相同
+`cohort_id + target_issue + seed` 内进行，并明确保存起止期、共同期数、种子数和实验版本。
+
+本轮严格停止了未能在单条 5 分钟内完成的三期对象/向量性能命令：workers=1 在 301 秒停止，
+workers=2 在 281 秒停止，加上首次内存 API 失败约 10 秒，累计约 592 秒后不再运行实验。
+因此 [v0.5.2 小型基准报告](outputs/reports/v052_vectorized_benchmark.md) 将完整加速比和峰值内存
+标记为不可用，不从部分运行推断性能结论。后续基准已支持逐目标 checkpoint，但本轮不再重跑。
+
+评分不等于真实中奖概率，彩票开奖结果是随机事件。
+
+## v0.5.1：实验正确性与计算复用
+
+v0.5.1 修正约束匹配随机基线并建立可中断恢复的共享计算路径：
+
+- B1 不再调用 `optimize_portfolio`。`build_feasible_portfolio_bank` 只按号码和硬约束生成
+  `FeasiblePortfolioBank`，B1 使用独立种子从银行均匀随机抽取；候选分数只在抽取后用于审计，
+  不参与选择。银行身份不含 `candidate_id`，候选编号或顺序变化不会改变 B1 号码分布。
+- 同一 `target_issue`、seed 和约束签名只生成一次银行，并保存 bank seed、bank size、
+  acceptance rate、bank hash 和候选号集合哈希。B2–B6 与 B1 共享候选号、银行成员和约束，
+  但 B2–B6 根据各自目标函数对同一个银行评分。
+- 360 组消融采用目标期优先的共享路径：候选号与原始结构特征各计算一次，15 种
+  window/decay 号码分通过 NumPy 批量计算，4 种结构权重组成评分矩阵，6 种
+  pool-size/core-count 约束各生成一个银行。不会重复运行 360 次完整 Pipeline。
+- 原始实验观测写入
+  `outputs/experiments/{phase}/{experiment_id}/seed_{seed}.parquet`。五字段主键重复会拒绝，
+  已完成目标期自动跳过，部分分区只追加缺失期次；三个时间阶段物理隔离。旧版 CSV 只作为
+  一次性迁移来源，不再作为新结果写入目标。
+- `ProcessPoolExecutor` 按目标期块或实验配置分片，默认进程数为
+  `min(cpu_count - 1, 8)`；每个任务保存确定性子种子、worker 数量、主机、开始/结束时间、
+  CPU/墙钟时间和失败任务。Python Portfolio 搜索不使用 ThreadPool。
+- 历史审计新增年度期号缺口、开奖日期异常、官方分页重复、来源记录数和 verified prefix
+  检查。真实缺失、分页重叠、来源不一致或前缀被修改均阻止正式实验；长假期等日期 warning
+  只进入报告，不修改数据，也不阻断运行。
+- 消融阶段固定为 screening（开发集每 5 期取 1 期、360 组、1 seed）、
+  full development（前 30 组、3 seeds）、calibration（前 5–10 组、5 seeds）和一次性
+  final holdout（冻结 1 组）。统计报告同时提供 Holm 与 Benjamini–Hochberg 修正。
+
+本阶段只运行了 B1 单期正确性验证：目标期 `08008`、截止期 `08007`，银行含 1,191 个
+唯一可行 Portfolio，5,000 次尝试的接受率为 23.82%。该单期结果仅验证执行链路和审计字段，
+不能用于策略比较或显著性结论。完整历史范围的 B1–B6 和 360 组消融仍未运行。
+
+### v0.5.1：B1–B6 100期配对冒烟
+
+在不运行 360 组消融的前提下，已使用 `seed=20260000` 和 `fast` profile 对 development
+中的连续目标期 `08009–08108` 运行 B1–B6，共保存 600 个严格向前观测：
+
+- 每个目标期只生成 1 份候选号码和 1 个约束相同的可行 Portfolio 银行；B1–B6 的
+  `candidate_numbers_hash` 一致，同约束的 `bank_hash` 一致，后续 5 个策略复用该银行。
+- 银行最小容量门槛为 500；低于门槛时会用同一 bank seed 成倍扩大搜索预算，达到门槛后才继续。
+  本次 100 期初始 5,000 次搜索均已达到门槛，没有实际触发扩容。
+- `bank_size` 的最小值、中位数、均值、最大值分别为
+  `1280 / 1393 / 1392.67 / 1512`；接受率对应为
+  `0.256000 / 0.278600 / 0.278534 / 0.302400`。
+- 第二次执行同一命令时 B1–B6 均自动跳过；真实重复主键试写被拒绝；六个分区对这 100 期的
+  pending 集合均为空。
+- 已生成 B2–B6 相对 B1 的 25 项配对 Bootstrap/置换检验结果，同时保存 Holm 与
+  Benjamini–Hochberg 校正值。该冒烟结果不用于参数选择，也不用于声明任何策略优势。
+- 本机 8 进程运行的正式 wall-clock 为 `6008.13` 秒，累计 CPU 时间为 `40413.48` 秒；
+  多进程缩放明显非线性，后续应优先减少多评分 CandidatePool 的 Python 对象物化。
+
+完整报告位于 `outputs/reports/v051_paired_smoke_100.md`，机器可读统计位于
+`outputs/reports/v051_paired_smoke_comparisons.csv`。可重复入口：
+
+```powershell
+uv run python scripts/run_v051_paired_smoke.py --workers 8 --chunk-size 13
+```
+
+评分不等于真实中奖概率，彩票开奖结果是随机事件。
+
+```powershell
+# 单期或小批量运行；重复执行会自动跳过已完成主键
+uv run python scripts/run_v05_experiments.py `
+  --experiment-ids B1 --phase development --target-issues 08008 --workers 1
+
+# 只从一个精确 schema_v3 run/cohort 分区汇总报告，不运行实验
+uv run python scripts/run_v05_experiments.py --report-only `
+  --run-context-sha256 <64位SHA256> `
+  --cohort-definition-sha256 <64位SHA256>
+
+# 非破坏性重建历史完整性报告
+uv run python scripts/audit_verified_history.py
+```
+
+共享银行和 ProcessPool 指标汇总见 `outputs/reports/experiment_runtime.md`；每次任务的完整主机、
+子种子、开始结束时间和失败列表保存在 `outputs/experiments/run_metadata/`。
+
+## v0.5：完整历史与严格实验
+
+v0.5 新增以下可审计边界：
+
+- `data/raw/draws.csv` 已由两个独立公开来源逐期逐字段核对，覆盖 `07001–26078` 共
+  2,896 期，当前冲突数为 0。
+- 官方来源为[中国体育彩票历史接口](https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry)，
+  独立来源为 [500.com 大乐透历史页](https://datachart.500.com/dlt/history/history.shtml)。
+- `data/snapshots/` 保存不可覆盖的原始响应、抓取时间、URL、内容哈希和元数据；正式历史旁边的
+  `draws.csv.verified.json` 绑定两份快照与规范历史哈希。
+- `canonical_history_sha256` 使用固定列顺序、两位号码和 LF 换行，只依赖逻辑记录；
+  `raw_file_sha256` 继续保留原文件身份。复盘会重新计算截止期前缀，历史被修改时拒绝执行。
+- 正式 `generate-next` 和 `run-backtest` 默认只接受 verified history。研究用途必须显式传入
+  `--allow-unverified-history`，生成 Artifact 会记录这一 override。
+- `SourceFetcher`、`SourceSnapshot`、`normalize_source_draws`、`reconcile_draw_sources`、
+  `resolve_conflict_record` 和 `write_verified_history` 构成与分析层解耦的双源导入流程；
+  冲突永不自动裁决。
+- `ExperimentSpec` 注册 B0–B8 基线，消融网格完整覆盖 3×5×4×3×2=360 组参数；
+  development/calibration/final holdout 采用连续 60%/20%/20% 时间划分。
+- 最终留出在运行前写入配置哈希，同一实验版本只允许一次正式结果；参数变化必须使用新版本。
+- 统计比较使用配对指标差、配对 bootstrap 95% 区间和配对置换检验，并输出按年份、按种子和
+  参数敏感性接口；不会用两个独立置信区间是否重叠来宣称优势。
+- 性能基准记录总耗时、Python 分配峰值内存、候选生成/评分、Portfolio 搜索和可行组合数。
+  当前完整历史实测中 NumPy 批量特征路径相对标量候选评分为 1.147x；4 线程没有稳定加速，
+  因此 `final` 默认仍为 1 线程。
+
+已完成的 development 历史结果包括 B0、B7、B8，各 1,637 个严格向前滚动观测；另有 B1
+单期正确性验证。B1 完整基线、B2–B6 优化策略、360 组消融、calibration 和 final holdout 尚未完成，因此当前没有
+统计依据声称任何策略显著优于约束匹配随机基线。详见 `outputs/reports/experiment_summary.md`。
+
+可重复执行入口：
+
+```powershell
+# 联网获取两个来源、保存不可变快照并仅在完全一致时写 verified history
+uv run python scripts/import_verified_history.py --end-issue 26078
+
+# 运行小批量基线；新观测追加到分区 Parquet，已完成主键自动跳过
+uv run python scripts/run_v05_experiments.py --experiment-ids B1 --target-issues 08008
+
+# 比较 fast/standard/final、1/4 workers 和 NumPy/标量候选特征路径
+uv run python scripts/run_v05_benchmark.py
+```
+
+## v0.4.1 基线能力
 
 已实现：
 
@@ -33,15 +380,15 @@
 - 默认至少 100 期历史，并为测试/研究短历史覆盖保存显式审计标记。
 - `fast`、`standard`、`final` 三种可展开并允许显式覆盖的运行 profile。
 
-尚未实现：
+v0.5.1 尚未完成：
 
-- 自动数据抓取和官方来源联网交叉核验。
-- 完整历史开奖数据集、旧规则配置和按期实际奖金数据。
+- 旧规则时期的完整奖级配置和逐期实际奖金数据。
 - 自动调度、开奖后触发和结果发布。
-- 大样本下的策略参数校准、稳定性结论和可视化报告。
+- B1–B6 完整历史回测、360 组消融、校准集选择和一次性最终留出结果。
 - 复杂机器学习模型。
 
-当前评分和优化器属于可替换的工程框架，尚未经过完整历史样本验证，不代表真实中奖概率，也不声称任何策略优于随机。
+当前评分和优化器属于可替换的工程框架；部分轻量策略已有完整 development 观测，但尚未完成与
+B1 约束匹配随机基线的配对比较，不代表真实中奖概率，也不声称任何策略优于随机。
 
 ## 环境与命令
 
@@ -67,7 +414,8 @@ dlt-number-analysis/
 │   └── processed/           # 校验或特征处理后的数据
 ├── config/                  # 奖级、奖金和票价配置
 ├── outputs/
-│   ├── backtests/           # 滚动回测结果
+│   ├── backtests/           # v0.5 以前的滚动回测结果与迁移来源
+│   ├── experiments/         # 按 phase/experiment/seed 分区的追加式 Parquet 与运行元数据
 │   ├── predictions/         # 预测日志
 │   └── reports/             # 复盘报告
 ├── scripts/                 # 可重复执行的制品生成脚本
@@ -286,4 +634,5 @@ Pipeline 提供 `fast`、`standard`、`final` 三种运行 profile，实际候�
 
 对于存在多个奖池上下文的规则，历史回测必须提供该期 `prize_context_by_issue` 或 `IssuePrizeRecord`；命中奖项但缺少上下文或浮动奖实际金额时，金额指标标为不可用。`IssuePrizeRecord` 绑定期号和规则版本，并允许用当期实际单注奖金覆盖规则配置。这样可以跨规则时期比较号码命中，但不会用 2026 年规则或猜测奖金计算旧期 ROI。
 
-报告始终包含完全随机五注 baseline 和固定风险声明。当前框架不声称任何策略优于随机；在缺少完整历史数据、旧规则配置、逐期实际奖金和足够样本前，不应做策略优越性结论。
+报告始终包含完全随机五注 baseline 和固定风险声明。当前框架不声称任何策略优于随机；在缺少
+旧规则配置、逐期实际奖金、B1 配对结果、校准与最终留出结果前，不应做策略优越性结论。

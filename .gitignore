@@ -14,9 +14,18 @@ data/processed/*
 !data/processed/.gitkeep
 outputs/backtests/*
 !outputs/backtests/.gitkeep
+!outputs/backtests/v05_observations.csv
 outputs/predictions/*
 !outputs/predictions/.gitkeep
 !outputs/predictions/*.json
 outputs/reports/*
 !outputs/reports/.gitkeep
 !outputs/reports/*.md
+!outputs/reports/ablation_results.csv
+!outputs/reports/v051_paired_smoke_comparisons.csv
+
+# v0.5.7 resumable formal-run artifacts (source and tracked audits stay visible)
+outputs/experiments/schema_v4/
+outputs/experiments/run_plans/
+outputs/experiments/run_metadata/
+outputs/formal_runs/

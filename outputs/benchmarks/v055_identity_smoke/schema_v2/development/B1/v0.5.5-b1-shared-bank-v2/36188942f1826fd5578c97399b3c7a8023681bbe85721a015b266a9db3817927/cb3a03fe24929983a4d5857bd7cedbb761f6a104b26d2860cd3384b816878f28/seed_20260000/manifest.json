@@ -1,0 +1,22 @@
+{
+  "completed_target_count": 3,
+  "created_at": "2026-07-16T15:39:33.671903Z",
+  "evaluation_mode": "raw_observation",
+  "execution_config_sha256": "cb3a03fe24929983a4d5857bd7cedbb761f6a104b26d2860cd3384b816878f28",
+  "execution_identity_schema_version": "experiment-execution-identity-v2",
+  "expected_target_count": 3,
+  "experiment_config_sha256": "5430143e3817ed161e49197ca3018edd0e645adbc9af1023f602e7db1af78874",
+  "experiment_id": "B1",
+  "experiment_version": "v0.5.5-b1-shared-bank-v2",
+  "history_sha256": "4481e6d5354bf277adf0186d184a357f64f266e9846fc0d2f81711d0f36f1128",
+  "parquet_sha256": "bfbaf4a01485ebef18175eaecfcb811c8ebc19a4de6cab108d745b19d247db63",
+  "phase": "development",
+  "portfolio_scoring_method": "numpy_vectorized",
+  "profile": "fast",
+  "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。",
+  "run_context_sha256": "36188942f1826fd5578c97399b3c7a8023681bbe85721a015b266a9db3817927",
+  "runner_version": "shared-feasible-bank-runner-v0.5.5",
+  "seed": 20260000,
+  "storage_schema_version": "experiment-storage-schema-v2",
+  "updated_at": "2026-07-16T15:39:33.671903Z"
+}

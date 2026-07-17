@@ -1,0 +1,74 @@
+{
+  "benchmark_version": "v0.5.6-logical-cohort-smoke-v1",
+  "checkpoint_schema_collision_repaired": true,
+  "cohort_definition_sha256": "ec201fd88465ceb2bfcb2c7e31d989b3b9fb1a830859ff6ea209d686e0e85c9e",
+  "cohort_id": "v056_cohort_smoke_6",
+  "error": null,
+  "evaluation_mode": "raw_observation",
+  "execution": {
+    "cpu_seconds": 39.75,
+    "gc_collection_counts": [
+      2794,
+      254,
+      19
+    ],
+    "memory_error": null,
+    "memory_scope": "isolated_subprocess_peak",
+    "peak_memory_mb": 579.44921875,
+    "process_exit_status": 0,
+    "timed_out": false,
+    "wall_clock_seconds": 41.698559900018154
+  },
+  "execution_config_sha256_by_experiment": {
+    "B1": "b1d22089dac7b8b4a4dfe2e7dece437157b4a87fecfd169822fbc2730fca8a16",
+    "B2": "71098076a4c94f70c98d786cc2749c956418ca04d4e45fbfb874c67cd652e521",
+    "B3": "605bd1e5f2f06a277917e125b1d11f072b142c46839e23e6832f1e0fb81c89b9",
+    "B4": "4778edcceab26f1a96422906352a14accd384501a91a64a66358114bff9d3110",
+    "B5": "d843806b2d9d305d2cc4c2ce251cc6b41ce37bb631463ca0b5948cededc57fd6",
+    "B6": "3ae8d39408e37a3d34985175ee3d39dcc27456c1c76eb74dfcc0ea1de8c96b80"
+  },
+  "expected_targets_sha256": "97c3c374db59745eef546bcc8a07f1b7516a4b50131e29a164c6f22a9d62d86d",
+  "initial_task_chunk_sizes": [
+    3,
+    3
+  ],
+  "initial_task_count": 2,
+  "logical_cohort_count": 1,
+  "observation_count": 36,
+  "paired_target_count": 6,
+  "parquet_hashes": {
+    "development\\B1\\v0.5.5-b1-shared-bank-v2\\8c4a54ad4307985f7e5300cdc637e285bb940ff4d50a50d817f8bdfba3aae07a\\b1d22089dac7b8b4a4dfe2e7dece437157b4a87fecfd169822fbc2730fca8a16\\ec201fd88465ceb2bfcb2c7e31d989b3b9fb1a830859ff6ea209d686e0e85c9e\\seed_20260000\\observations.parquet": "922605b306ad449d462aabc297c63302ab98fa8a84a071bf63d91d515bf1fc6d",
+    "development\\B2\\v0.5.5-b2-shared-bank-v2\\8c4a54ad4307985f7e5300cdc637e285bb940ff4d50a50d817f8bdfba3aae07a\\71098076a4c94f70c98d786cc2749c956418ca04d4e45fbfb874c67cd652e521\\ec201fd88465ceb2bfcb2c7e31d989b3b9fb1a830859ff6ea209d686e0e85c9e\\seed_20260000\\observations.parquet": "538e623edec815d854e83863c7d942b5b055d157f40d020d7853e3baa737aa27",
+    "development\\B3\\v0.5.5-b3-shared-bank-v2\\8c4a54ad4307985f7e5300cdc637e285bb940ff4d50a50d817f8bdfba3aae07a\\605bd1e5f2f06a277917e125b1d11f072b142c46839e23e6832f1e0fb81c89b9\\ec201fd88465ceb2bfcb2c7e31d989b3b9fb1a830859ff6ea209d686e0e85c9e\\seed_20260000\\observations.parquet": "e9c9898628969ecc8832e1003f511c2a60c96b6ebbbc288092ca757d706a69a4",
+    "development\\B4\\v0.5.5-b4-shared-bank-v2\\8c4a54ad4307985f7e5300cdc637e285bb940ff4d50a50d817f8bdfba3aae07a\\4778edcceab26f1a96422906352a14accd384501a91a64a66358114bff9d3110\\ec201fd88465ceb2bfcb2c7e31d989b3b9fb1a830859ff6ea209d686e0e85c9e\\seed_20260000\\observations.parquet": "8938f6f5d526fe5be13d01f4b5fa3cd35f6ce3c291b85a9ed29057d5d82ee458",
+    "development\\B5\\v0.5.5-b5-shared-bank-v2\\8c4a54ad4307985f7e5300cdc637e285bb940ff4d50a50d817f8bdfba3aae07a\\d843806b2d9d305d2cc4c2ce251cc6b41ce37bb631463ca0b5948cededc57fd6\\ec201fd88465ceb2bfcb2c7e31d989b3b9fb1a830859ff6ea209d686e0e85c9e\\seed_20260000\\observations.parquet": "41ca5ed48ca70934cfe7a30d0d454dcad58967da6400ce41aed9c9fa92d9efdd",
+    "development\\B6\\v0.5.5-b6-shared-bank-v2\\8c4a54ad4307985f7e5300cdc637e285bb940ff4d50a50d817f8bdfba3aae07a\\3ae8d39408e37a3d34985175ee3d39dcc27456c1c76eb74dfcc0ea1de8c96b80\\ec201fd88465ceb2bfcb2c7e31d989b3b9fb1a830859ff6ea209d686e0e85c9e\\seed_20260000\\observations.parquet": "de02bb38a0e4404a373bd5ef74ea7bb7f0fbafb3259f3856b12c421b6de2eab3"
+  },
+  "portfolio_scoring_method": "numpy_vectorized",
+  "preflight_ready": true,
+  "process_count": 1,
+  "profile": "fast",
+  "risk_disclaimer": "评分不等于真实中奖概率，彩票开奖结果是随机事件。",
+  "run_context_sha256": "8c4a54ad4307985f7e5300cdc637e285bb940ff4d50a50d817f8bdfba3aae07a",
+  "run_seconds": 39.182636300014565,
+  "schema_version": "v0.5.3",
+  "storage_schema_version": "experiment-storage-schema-v3",
+  "smoke_version": "v0.5.6-logical-cohort-smoke-v1",
+  "status": "completed",
+  "targets": [
+    "08008",
+    "10028",
+    "12048",
+    "14068",
+    "16088",
+    "18109"
+  ],
+  "task_seconds": [
+    18.30404020001879,
+    20.878585700003896
+  ],
+  "task_targets_sha256": [
+    "d0fe7899c67dca4ba3ab13da90dd7d550466918e0d5ba32212b937eb85e52a5d",
+    "fc383eedb913d681db21e870210417c700bafb19676dd4091a9fa04a59ac9eb4"
+  ]
+}
